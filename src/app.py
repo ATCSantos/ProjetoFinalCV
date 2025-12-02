@@ -38,10 +38,13 @@ def main():
         if FLIP_CAMERA:
             frame = cv2.flip(frame, 1)
 
+        draw_text(frame, "Fruit Arcade (TESTE) ç º ã ó ", (20, 40), 0.9, 2)
+
         cv2.imshow(WINDOW_NAME, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == 27:  # ESC
             break
+
 
     cap.release()
     cv2.destroyAllWindows()
