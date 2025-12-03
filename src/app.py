@@ -1,10 +1,7 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
-
 import time
 from pathlib import Path
 from typing import Optional, Tuple
-
 import cv2
 import numpy as np
 
@@ -143,20 +140,19 @@ def main() -> None:
 
         h, w = frame.shape[:2]
 
-        # ✅ elementos visuais primeiro (logo ou placeholder)
         if logo is not None:
             target_w = int(w * 0.42)
             target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
             overlay_bgra(frame, logo, (w // 2, int(h * 0.16)), (target_w, target_h))
         else:
-            # Placeholder simples
+            # PLACEHOLDER
             x1, y1 = w // 2 - 180, int(h * 0.06)
             x2, y2 = w // 2 + 180, int(h * 0.22)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
             draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
 
-        # ✅ texto depois (fica por cima)
+        #texto por cima
         draw_text(frame, "Fruit Arcade — overlay PNG (commit)", (20, 40), 0.8, 2)
         draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
         draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
