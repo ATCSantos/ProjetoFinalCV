@@ -697,7 +697,7 @@ def main() -> None:
                 menu_reset(menu)
                 guns = None
 
-        if face.has_face:
+        if face.has_face and mode != Mode.GUN:
             cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
             cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
             cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1)
