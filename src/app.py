@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 import cv2
 import numpy as np
+from dataclasses import dataclass
+import mediapipe as mp
 
 # ----------------------------
 # Configuração
@@ -89,6 +91,69 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
     out = src_rgb * alpha + roi_f * (1.0 - alpha)
     roi[:, :] = out.astype(np.uint8)
 
+
+EMA_ALPHA = 0.25
+
+@dataclass
+class FaceData:
+    nose: Tuple[float, float]
+    mouth_open: float
+    has_face: bool
+
+class FaceTracker:
+    NOSE_IDX = 1
+    UPPER_LIP_IDX = 13
+    LOWER_LIP_IDX = 14
+    LEFT_EYE_OUTER = 33
+    RIGHT_EYE_OUTER = 263
+
+    def __init__(self) -> None:
+        self.mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=False,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self._nose_ema: Optional[Tuple[float, float]] = None
+        self._mouth_ema: Optional[float] = None
+
+    def process(self, frame_bgr: np.ndarray) -> FaceData:
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        res = self.mesh.process(rgb)
+        rgb.flags.writeable = True
+
+        if not res.multi_face_landmarks:
+            self._nose_ema = None
+            self._mouth_ema = None
+            return FaceData((0.5, 0.5), 0.0, False)
+
+        lm = res.multi_face_landmarks[0].landmark
+        nose = (lm[self.NOSE_IDX].x, lm[self.NOSE_IDX].y)
+
+        eyeL = np.array([lm[self.LEFT_EYE_OUTER].x, lm[self.LEFT_EYE_OUTER].y], dtype=np.float32)
+        eyeR = np.array([lm[self.RIGHT_EYE_OUTER].x, lm[self.RIGHT_EYE_OUTER].y], dtype=np.float32)
+        eye_dist = float(np.linalg.norm(eyeL - eyeR)) + 1e-6
+
+        upper = np.array([lm[self.UPPER_LIP_IDX].x, lm[self.UPPER_LIP_IDX].y], dtype=np.float32)
+        lower = np.array([lm[self.LOWER_LIP_IDX].x, lm[self.LOWER_LIP_IDX].y], dtype=np.float32)
+        mouth_open = float(np.linalg.norm(upper - lower)) / eye_dist
+
+        if self._nose_ema is None:
+            self._nose_ema = nose
+            self._mouth_ema = mouth_open
+        else:
+            self._nose_ema = (
+                lerp(self._nose_ema[0], nose[0], EMA_ALPHA),
+                lerp(self._nose_ema[1], nose[1], EMA_ALPHA),
+            )
+            self._mouth_ema = lerp(self._mouth_ema, mouth_open, EMA_ALPHA)
+
+        return FaceData(self._nose_ema, float(self._mouth_ema), True)
+
+
+
 class SpriteBank:
     def __init__(self) -> None:
         self.logo = load_png_rgba(str(ASSETS_DIR / "logo.png"))
@@ -131,6 +196,8 @@ def main() -> None:
     bank = SpriteBank()
     logo = bank.logo
 
+    face_tracker = FaceTracker()
+
     t0 = now_s()
 
     while True:
@@ -140,6 +207,8 @@ def main() -> None:
 
         if FLIP_CAMERA:
             frame = cv2.flip(frame, 1)
+
+        face = face_tracker.process(frame)
 
         h, w = frame.shape[:2]
 
@@ -154,11 +223,17 @@ def main() -> None:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
             draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
-        bank.draw_fruit(frame, "banana", (80, h - 120), 120)
+
+        if face.has_face:
+            cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
+            cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
+            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1)
+            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2)
 
         #texto por cima
-        draw_text(frame, "Fruit Arcade — overlay PNG (commit)", (20, 40), 0.8, 2)
+        draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
         draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
+        draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
         draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
 
         cv2.imshow(WINDOW_NAME, frame)
