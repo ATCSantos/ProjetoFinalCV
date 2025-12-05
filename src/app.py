@@ -127,7 +127,10 @@ def main() -> None:
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    logo = load_png_rgba(str(ASSETS_DIR / "logo.png"))
+    # logo = load_png_rgba(str(ASSETS_DIR / "logo.png"))
+    bank = SpriteBank()
+    logo = bank.logo
+
     t0 = now_s()
 
     while True:
@@ -151,6 +154,7 @@ def main() -> None:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
             draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
+        bank.draw_fruit(frame, "banana", (80, h - 120), 120)
 
         #texto por cima
         draw_text(frame, "Fruit Arcade — overlay PNG (commit)", (20, 40), 0.8, 2)
