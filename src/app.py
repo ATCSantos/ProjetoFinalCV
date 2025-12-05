@@ -21,6 +21,7 @@ ESPELHAR_CAMARA = True
 LARGURA_CAMARA = 640
 ALTURA_CAMARA = 480
 ESCALA_TRACKING = 0.5
+TRACK_CADA_N_FRAMES = 2
 
 PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
@@ -548,7 +549,6 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         hy = int(clamp(mao.tip[1], 0.0, 1.0) * h)
         cv2.circle(frame, (hx, hy), 10, (255, 255, 255), -1)
         cv2.circle(frame, (hx, hy), 10, (0, 0, 0), 2)
-
         draw_text(frame, f"gesto: {mao.gesture}", (20, 210), 0.7, 2)
 
     draw_text(frame, f"Score: {gs.score}", (20, 245), 0.8, 2)
@@ -588,6 +588,8 @@ def main() -> None:
     guns: Optional[GunslingerState] = None
 
     t0 = now_s()
+    contador_frames = 0
+    ultimo_face = FaceData((0.5, 0.5), 0.0, False)
 
     while True:
         ok, frame = cap.read()
@@ -597,22 +599,26 @@ def main() -> None:
         if ESPELHAR_CAMARA:
             frame = cv2.flip(frame, 1)
 
+        h, w = frame.shape[:2]
+
         if ESCALA_TRACKING != 1.0:
-            h0, w0 = frame.shape[:2]
-            frame_track = cv2.resize(frame, (int(w0 * ESCALA_TRACKING), int(h0 * ESCALA_TRACKING)), interpolation=cv2.INTER_AREA)
+            frame_track = cv2.resize(frame, (int(w * ESCALA_TRACKING), int(h * ESCALA_TRACKING)), interpolation=cv2.INTER_AREA)
         else:
             frame_track = frame
-
-        face = face_tracker.process(frame_track)
-
-        h, w = frame.shape[:2]
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
             break
 
+        if mode != Mode.GUN:
+            contador_frames += 1
+            if TRACK_CADA_N_FRAMES <= 1 or (contador_frames % TRACK_CADA_N_FRAMES) == 0 or (not ultimo_face.has_face):
+                ultimo_face = face_tracker.process(frame_track)
+        face = ultimo_face if mode != Mode.GUN else FaceData((0.5, 0.5), 0.0, False)
+
         if mode == Mode.MENU:
             menu_update(menu, face)
+
 
             if logo is not None:
                 target_w = int(w * 0.42)
@@ -620,7 +626,6 @@ def main() -> None:
                 logo_ok = bank.logo_scaled((target_w, target_h))
                 overlay_bgra(frame, logo_ok, (w // 2, int(h * 0.16)), (target_w, target_h))
             else:
-                # PLACEHOLDER
                 x1, y1 = w // 2 - 180, int(h * 0.06)
                 x2, y2 = w // 2 + 180, int(h * 0.22)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
@@ -700,13 +705,14 @@ def main() -> None:
         if face.has_face and mode != Mode.GUN:
             cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
             cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
-            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1)
-            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2)
+            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
 
         #texto por cima
         draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
         draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
-        draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
+        if mode != Mode.GUN:
+            draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
         draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
 
         cv2.imshow(NOME_JANELA, frame)
