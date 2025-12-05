@@ -14,10 +14,14 @@ import mediapipe as mp
 # ----------------------------
 
 CAMERA_INDEX = 0
-WINDOW_NAME = "Fruit Arcade"
-FLIP_CAMERA = True
+NOME_JANELA = "Fruit Arcade"
+ESPELHAR_CAMARA = True
 
-ASSETS_DIR = (Path(__file__).resolve().parent.parent / "assets")
+LARGURA_CAMARA = 640
+ALTURA_CAMARA = 480
+ESCALA_TRACKING = 0.5
+
+PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
 MENU_DX = 0.07
 MENU_DY = 0.07
@@ -79,7 +83,10 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
     if w <= 1 or h <= 1:
         return
 
-    src = cv2.resize(src_bgra, (w, h), interpolation=cv2.INTER_AREA)
+    if src_bgra.shape[1] == w and src_bgra.shape[0] == h:
+        src = src_bgra
+    else:
+        src = cv2.resize(src_bgra, (w, h), interpolation=cv2.INTER_AREA)
 
     cx, cy = center_xy
     x1 = int(cx - w // 2)
@@ -132,7 +139,7 @@ class FaceTracker:
         self.mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
-            refine_landmarks=True,
+            refine_landmarks=False,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
@@ -177,25 +184,37 @@ class FaceTracker:
 
 class SpriteBank:
     def __init__(self) -> None:
-        self.logo = load_png_rgba(str(ASSETS_DIR / "logo.png"))
+        self.logo = load_png_rgba(str(PASTA_ASSETS / "logo.png"))
         self.fruits = {
-            "orange": load_png_rgba(str(ASSETS_DIR / "orange.png")),
-            "apple": load_png_rgba(str(ASSETS_DIR / "apple.png")),
-            "watermelon": load_png_rgba(str(ASSETS_DIR / "watermelon.png")),
-            "banana": load_png_rgba(str(ASSETS_DIR / "banana.png")),
+            "orange": load_png_rgba(str(PASTA_ASSETS / "orange.png")),
+            "apple": load_png_rgba(str(PASTA_ASSETS / "apple.png")),
+            "watermelon": load_png_rgba(str(PASTA_ASSETS / "watermelon.png")),
+            "banana": load_png_rgba(str(PASTA_ASSETS / "banana.png")),
         }
         self.fruit_keys = list(self.fruits.keys())
+        self._cache_fruit: dict[Tuple[str, int], np.ndarray] = {}
+        self._cache_logo: dict[Tuple[int, int], np.ndarray] = {}
 
-    def draw_logo(self, frame: np.ndarray) -> None:
+    def logo_scaled(self, size: Tuple[int, int]) -> Optional[np.ndarray]:
         if self.logo is None:
-            return
-        h, w = frame.shape[:2]
-        target_w = int(w * 0.45)
-        target_h = int(target_w * (self.logo.shape[0] / self.logo.shape[1]))
-        overlay_bgra(frame, self.logo, (w // 2, int(h * 0.12)), (target_w, target_h))
+            return None
+        w, h = size
+        key = (w, h)
+        if key not in self._cache_logo:
+            self._cache_logo[key] = cv2.resize(self.logo, (w, h), interpolation=cv2.INTER_AREA)
+        return self._cache_logo[key]
+
+    def fruit_scaled(self, kind: str, size_px: int) -> Optional[np.ndarray]:
+        sprite = self.fruits.get(kind)
+        if sprite is None:
+            return None
+        key = (kind, size_px)
+        if key not in self._cache_fruit:
+            self._cache_fruit[key] = cv2.resize(sprite, (size_px, size_px), interpolation=cv2.INTER_AREA)
+        return self._cache_fruit[key]
 
     def draw_fruit(self, frame: np.ndarray, kind: str, center: Tuple[int, int], size_px: int) -> None:
-        sprite = self.fruits.get(kind)
+        sprite = self.fruit_scaled(kind, size_px)
         if sprite is None:
             cv2.circle(frame, center, size_px // 2, (0, 165, 255), -1, cv2.LINE_AA)
             cv2.circle(frame, center, size_px // 2, (255, 255, 255), 2, cv2.LINE_AA)
@@ -378,7 +397,10 @@ def main() -> None:
     if not cap.isOpened():
         raise SystemExit("Não foi possível abrir a câmara (ajusta CAMERA_INDEX).")
 
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, LARGURA_CAMARA)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, ALTURA_CAMARA)
+
+    cv2.namedWindow(NOME_JANELA, cv2.WINDOW_NORMAL)
 
     bank = SpriteBank()
     logo = bank.logo
@@ -398,10 +420,16 @@ def main() -> None:
         if not ok:
             break
 
-        if FLIP_CAMERA:
+        if ESPELHAR_CAMARA:
             frame = cv2.flip(frame, 1)
 
-        face = face_tracker.process(frame)
+        if ESCALA_TRACKING != 1.0:
+            h0, w0 = frame.shape[:2]
+            frame_track = cv2.resize(frame, (int(w0 * ESCALA_TRACKING), int(h0 * ESCALA_TRACKING)), interpolation=cv2.INTER_AREA)
+        else:
+            frame_track = frame
+
+        face = face_tracker.process(frame_track)
 
         h, w = frame.shape[:2]
 
@@ -415,7 +443,8 @@ def main() -> None:
             if logo is not None:
                 target_w = int(w * 0.42)
                 target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
-                overlay_bgra(frame, logo, (w // 2, int(h * 0.16)), (target_w, target_h))
+                logo_ok = bank.logo_scaled((target_w, target_h))
+                overlay_bgra(frame, logo_ok, (w // 2, int(h * 0.16)), (target_w, target_h))
             else:
                 # PLACEHOLDER
                 x1, y1 = w // 2 - 180, int(h * 0.06)
@@ -493,7 +522,7 @@ def main() -> None:
         draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
         draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
 
-        cv2.imshow(WINDOW_NAME, frame)
+        cv2.imshow(NOME_JANELA, frame)
 
     cap.release()
     cv2.destroyAllWindows()
