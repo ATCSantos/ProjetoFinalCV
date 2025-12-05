@@ -4,7 +4,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 import cv2
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum, auto
 import mediapipe as mp
 
 # ----------------------------
@@ -14,9 +15,17 @@ import mediapipe as mp
 CAMERA_INDEX = 0
 WINDOW_NAME = "Fruit Arcade"
 FLIP_CAMERA = True
-
-# caminho robusto (independente de onde corres o python)
 ASSETS_DIR = (Path(__file__).resolve().parent.parent / "assets")
+
+MENU_DX = 0.07
+MENU_DY = 0.07
+HOLD_CONFIRM_S = 0.22
+HOLD_EXIT_S = 0.35
+CALIBRATION_S = 0.9
+
+MENU_CONFIRM_BY_MOUTH = True
+MENU_MOUTH_THRESHOLD = 0.055
+MENU_MOUTH_HOLD_S = 0.22
 
 # ----------------------------
 # Utilitários
@@ -181,6 +190,91 @@ class SpriteBank:
             return
         overlay_bgra(frame, sprite, center, (size_px, size_px))
 
+
+class Mode(Enum):
+    MENU = auto()
+    FRUIT = auto()
+    GUN = auto()
+
+
+@dataclass
+class MenuState:
+    baseline: Optional[Tuple[float, float]] = None
+    calib_start: float = 0.0
+    is_calibrating: bool = True
+    sample_sum: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float64))
+    sample_count: int = 0
+
+    selected: int = 0
+    t_hold_confirm: Optional[float] = None
+    t_hold_exit: Optional[float] = None
+    t_mouth_confirm: Optional[float] = None
+
+
+def menu_reset(ms: MenuState) -> None:
+    ms.baseline = None
+    ms.calib_start = now_s()
+    ms.is_calibrating = True
+    ms.sample_sum[:] = 0.0
+    ms.sample_count = 0
+    ms.t_hold_confirm = None
+    ms.t_hold_exit = None
+    ms.t_mouth_confirm = None
+
+
+def menu_update(ms: MenuState, face: FaceData) -> None:
+    if not face.has_face:
+        return
+
+    n = np.array(face.nose, dtype=np.float64)
+
+    if ms.is_calibrating:
+        ms.sample_sum += n
+        ms.sample_count += 1
+        if now_s() - ms.calib_start >= CALIBRATION_S and ms.sample_count > 0:
+            ms.baseline = tuple((ms.sample_sum / ms.sample_count).tolist())
+            ms.is_calibrating = False
+        return
+
+    if ms.baseline is None:
+        return
+
+    bx, by = ms.baseline
+    dx = n[0] - bx
+    dy = n[1] - by
+    t = now_s()
+
+    if dx < -MENU_DX:
+        ms.selected = 0
+    elif dx > MENU_DX:
+        ms.selected = 1
+
+    if dy < -MENU_DY:
+        ms.t_hold_confirm = ms.t_hold_confirm or t
+    else:
+        ms.t_hold_confirm = None
+
+    if dy > MENU_DY:
+        ms.t_hold_exit = ms.t_hold_exit or t
+    else:
+        ms.t_hold_exit = None
+
+    if MENU_CONFIRM_BY_MOUTH and face.mouth_open >= MENU_MOUTH_THRESHOLD:
+        ms.t_mouth_confirm = ms.t_mouth_confirm or t
+    else:
+        ms.t_mouth_confirm = None
+
+
+def menu_confirmed(ms: MenuState) -> bool:
+    by_head = ms.t_hold_confirm is not None and (now_s() - ms.t_hold_confirm) >= HOLD_CONFIRM_S
+    by_mouth = ms.t_mouth_confirm is not None and (now_s() - ms.t_mouth_confirm) >= MENU_MOUTH_HOLD_S
+    return by_head or by_mouth
+
+
+def menu_exit(ms: MenuState) -> bool:
+    return ms.t_hold_exit is not None and (now_s() - ms.t_hold_exit) >= HOLD_EXIT_S
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -198,6 +292,10 @@ def main() -> None:
 
     face_tracker = FaceTracker()
 
+    mode = Mode.MENU
+    menu = MenuState()
+    menu_reset(menu)
+
     t0 = now_s()
 
     while True:
@@ -212,17 +310,79 @@ def main() -> None:
 
         h, w = frame.shape[:2]
 
-        if logo is not None:
-            target_w = int(w * 0.42)
-            target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
-            overlay_bgra(frame, logo, (w // 2, int(h * 0.16)), (target_w, target_h))
-        else:
-            # PLACEHOLDER
-            x1, y1 = w // 2 - 180, int(h * 0.06)
-            x2, y2 = w // 2 + 180, int(h * 0.22)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-            draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            break
+
+        if mode == Mode.MENU:
+            menu_update(menu, face)
+
+            if logo is not None:
+                target_w = int(w * 0.42)
+                target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
+                overlay_bgra(frame, logo, (w // 2, int(h * 0.16)), (target_w, target_h))
+            else:
+                # PLACEHOLDER
+                x1, y1 = w // 2 - 180, int(h * 0.06)
+                x2, y2 = w // 2 + 180, int(h * 0.22)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+                draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
+
+            tile_w = w // 3
+            tile_h = int(h * 0.35)
+            y0 = int(h * 0.35)
+
+            x1 = w // 10
+            x2 = x1 + tile_w
+            x3 = w - w // 10 - tile_w
+            x4 = x3 + tile_w
+
+            cv2.rectangle(frame, (x1, y0), (x2, y0 + tile_h), (40, 160, 40), -1)
+            cv2.rectangle(frame, (x3, y0), (x4, y0 + tile_h), (40, 40, 160), -1)
+
+            bank.draw_fruit(frame, "banana", (x1 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
+            bank.draw_fruit(frame, "watermelon", (x3 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
+
+            if menu.selected == 0:
+                cv2.rectangle(frame, (x1 - 6, y0 - 6), (x2 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
+            else:
+                cv2.rectangle(frame, (x3 - 6, y0 - 6), (x4 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
+
+            draw_text(frame, "1) Fruit Catcher", (x1 + 22, y0 + tile_h - 45), 0.85, 2)
+            draw_text(frame, "Nariz move", (x1 + 22, y0 + tile_h - 18), 0.60, 2)
+            draw_text(frame, "2) Gunslinger", (x3 + 22, y0 + tile_h - 45), 0.85, 2)
+            draw_text(frame, "Indicador toca", (x3 + 22, y0 + tile_h - 18), 0.60, 2)
+
+            if menu.is_calibrating:
+                draw_text(frame, "A calibrar... olha em frente", (20, h - 55), 0.65, 2)
+
+            if key in (ord("r"), ord("R")):
+                menu_reset(menu)
+
+            do_confirm = (not menu.is_calibrating) and (menu_confirmed(menu) or key in (13, 10))
+            if menu_exit(menu):
+                break
+
+            if do_confirm:
+                if menu.selected == 0:
+                    mode = Mode.FRUIT
+                else:
+                    mode = Mode.GUN
+
+        elif mode == Mode.FRUIT:
+            draw_text(frame, "Fruit Catcher (WIP)", (20, 140), 1.0, 2)
+            draw_text(frame, "Q: voltar ao menu", (20, 180), 0.7, 2)
+            if key in (ord("q"), ord("Q")):
+                mode = Mode.MENU
+                menu_reset(menu)
+
+        elif mode == Mode.GUN:
+            draw_text(frame, "Gunslinger (WIP)", (20, 140), 1.0, 2)
+            draw_text(frame, "Q: voltar ao menu", (20, 180), 0.7, 2)
+            if key in (ord("q"), ord("Q")):
+                mode = Mode.MENU
+                menu_reset(menu)
 
         if face.has_face:
             cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
@@ -237,9 +397,6 @@ def main() -> None:
         draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
 
         cv2.imshow(WINDOW_NAME, frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:
-            break
 
     cap.release()
     cv2.destroyAllWindows()
