@@ -21,6 +21,7 @@ LARGURA_CAMARA = 640
 ALTURA_CAMARA = 480
 ESCALA_TRACKING = 0.5
 
+
 PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
 MENU_DX = 0.07
@@ -376,7 +377,7 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
 
     draw_text(frame, f"FRUIT CATCHER  |  Score: {cs.score}", (20, 140), 0.9, 2)
     draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
-    draw_text(frame, "Q: voltar ao menu", (20, h - 20), 0.6, 2)
+    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
 
     done = remaining <= 0.0
     if done:
