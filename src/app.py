@@ -1,5 +1,6 @@
 from __future__ import annotations
 import time
+import math
 import random
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -20,7 +21,6 @@ ESPELHAR_CAMARA = True
 LARGURA_CAMARA = 640
 ALTURA_CAMARA = 480
 ESCALA_TRACKING = 0.5
-
 
 PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
@@ -43,6 +43,11 @@ BASKET_H = 30
 
 ENABLE_MOUTH_TO_CATCH = False
 MOUTH_OPEN_THRESHOLD = 0.055
+
+GUN_ROUND_TIMEOUT_S = 2.5
+SIGNAL_DELAY_S = (1.0, 2.6)
+TARGET_RADIUS = 60
+SHOT_COOLDOWN_S = 0.7
 
 # ----------------------------
 # Utilitários
@@ -180,6 +185,79 @@ class FaceTracker:
             self._mouth_ema = lerp(self._mouth_ema, mouth_open, EMA_ALPHA)
 
         return FaceData(self._nose_ema, float(self._mouth_ema), True)
+
+
+@dataclass
+class HandData:
+    tip: Tuple[float, float]
+    label: str
+    gesture: str
+
+class HandTracker:
+    INDEX_TIP = 8
+    INDEX_PIP = 6
+    MIDDLE_TIP = 12
+    MIDDLE_PIP = 10
+    RING_TIP = 16
+    RING_PIP = 14
+    PINKY_TIP = 20
+    PINKY_PIP = 18
+    THUMB_TIP = 4
+    THUMB_IP = 3
+
+    def __init__(self) -> None:
+        self.hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            model_complexity=1,
+            min_detection_confidence=0.55,
+            min_tracking_confidence=0.55,
+        )
+
+    def _finger_extended(self, lm, tip_i: int, pip_i: int) -> bool:
+        return lm[tip_i].y < lm[pip_i].y
+
+    def _thumb_extended(self, lm, label: str) -> bool:
+        if label == "Right":
+            return lm[self.THUMB_TIP].x > lm[self.THUMB_IP].x
+        return lm[self.THUMB_TIP].x < lm[self.THUMB_IP].x
+
+    def _classify(self, lm, label: str) -> str:
+        thumb = self._thumb_extended(lm, label)
+        index_ = self._finger_extended(lm, self.INDEX_TIP, self.INDEX_PIP)
+        middle = self._finger_extended(lm, self.MIDDLE_TIP, self.MIDDLE_PIP)
+        ring = self._finger_extended(lm, self.RING_TIP, self.RING_PIP)
+        pinky = self._finger_extended(lm, self.PINKY_TIP, self.PINKY_PIP)
+
+        extended = [thumb, index_, middle, ring, pinky]
+        cnt = sum(1 for v in extended if v)
+
+        if cnt == 0:
+            return "FIST"
+        if cnt == 5:
+            return "OPEN"
+        if index_ and (not middle) and (not ring) and (not pinky) and (not thumb):
+            return "POINT"
+        if index_ and middle and (not ring) and (not pinky):
+            return "PEACE"
+        if thumb and (not index_) and (not middle) and (not ring) and (not pinky):
+            return "THUMBS"
+        return "OTHER"
+
+    def process(self, frame_bgr: np.ndarray) -> Optional[HandData]:
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        res = self.hands.process(rgb)
+        rgb.flags.writeable = True
+
+        if not res.multi_hand_landmarks or not res.multi_handedness:
+            return None
+
+        lm = res.multi_hand_landmarks[0].landmark
+        label = res.multi_handedness[0].classification[0].label
+        tip = (lm[self.INDEX_TIP].x, lm[self.INDEX_TIP].y)
+        gesto = self._classify(lm, label)
+        return HandData(tip=tip, label=label, gesture=gesto)
 
 
 
@@ -389,6 +467,98 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
     return frame, done
 
 
+@dataclass
+class GunslingerState:
+    phase: str
+    score: int
+    best_time: Optional[float]
+    signal_t: float
+    next_signal_t: float
+    target: Tuple[int, int]
+    target_kind: str
+    last_shot_t: float
+    last_reaction: Optional[float] = None
+
+
+def gunslinger_new_target(w: int, h: int, bank: SpriteBank) -> Tuple[Tuple[int, int], float, str]:
+    tx = random.randint(w // 3, int(w * 0.66))
+    ty = random.randint(h // 3, int(h * 0.66))
+    next_signal = now_s() + random.uniform(*SIGNAL_DELAY_S)
+    kind = random.choice(bank.fruit_keys) if bank.fruit_keys else "orange"
+    return (tx, ty), next_signal, kind
+
+
+def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerState, bank: SpriteBank) -> np.ndarray:
+    h, w = frame.shape[:2]
+    t = now_s()
+    tx, ty = gs.target
+
+    if gs.phase == "WAIT" and t >= gs.next_signal_t:
+        gs.phase = "SIGNAL"
+        gs.signal_t = t
+        gs.last_reaction = None
+
+    if gs.phase == "SIGNAL":
+        if t - gs.signal_t >= GUN_ROUND_TIMEOUT_S:
+            gs.phase = "RESULT"
+            gs.last_shot_t = t
+            gs.last_reaction = None
+
+        if mao is not None and (t - gs.last_shot_t) >= SHOT_COOLDOWN_S:
+            hx = int(clamp(mao.tip[0], 0.0, 1.0) * w)
+            hy = int(clamp(mao.tip[1], 0.0, 1.0) * h)
+
+            if mao.gesture in ("POINT", "PEACE", "OPEN") and (hx - tx) ** 2 + (hy - ty) ** 2 <= TARGET_RADIUS ** 2:
+                rt = t - gs.signal_t
+                gs.last_reaction = rt
+                gs.best_time = rt if gs.best_time is None else min(gs.best_time, rt)
+                gs.score += 1
+                gs.phase = "RESULT"
+                gs.last_shot_t = t
+
+    if gs.phase == "RESULT" and (t - gs.last_shot_t) >= 1.2:
+        gs.target, gs.next_signal_t, gs.target_kind = gunslinger_new_target(w, h, bank)
+        gs.phase = "WAIT"
+
+    if gs.phase == "WAIT":
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, (140, 140, 140), -1, cv2.LINE_AA)
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, (255, 255, 255), 2, cv2.LINE_AA)
+        bank.draw_fruit(frame, gs.target_kind, (tx, ty), size_px=TARGET_RADIUS * 2 - 6)
+        draw_text(frame, "GUNSLINGER  |  Espera pelo sinal...", (20, 140), 0.9, 2)
+
+    elif gs.phase == "SIGNAL":
+        pulse = 0.5 + 0.5 * math.sin((t - gs.signal_t) * 10.0)
+        col = (int(80 + 175 * pulse), int(80 + 175 * pulse), 0)
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, col, -1, cv2.LINE_AA)
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, (255, 255, 255), 2, cv2.LINE_AA)
+        bank.draw_fruit(frame, gs.target_kind, (tx, ty), size_px=TARGET_RADIUS * 2 - 6)
+        draw_text(frame, "AGORA! Toca na fruta com o indicador", (20, 140), 0.75, 2)
+
+    else:
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, (0, 200, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, (tx, ty), TARGET_RADIUS, (255, 255, 255), 2, cv2.LINE_AA)
+        bank.draw_fruit(frame, gs.target_kind, (tx, ty), size_px=TARGET_RADIUS * 2 - 6)
+        if gs.last_reaction is not None:
+            draw_text(frame, f"OK! {gs.last_reaction:0.3f}s", (20, 175), 0.85, 2)
+        else:
+            draw_text(frame, "Falhou (timeout)", (20, 175), 0.85, 2)
+
+    if mao is not None:
+        hx = int(clamp(mao.tip[0], 0.0, 1.0) * w)
+        hy = int(clamp(mao.tip[1], 0.0, 1.0) * h)
+        cv2.circle(frame, (hx, hy), 10, (255, 255, 255), -1)
+        cv2.circle(frame, (hx, hy), 10, (0, 0, 0), 2)
+
+        draw_text(frame, f"gesto: {mao.gesture}", (20, 210), 0.7, 2)
+
+    draw_text(frame, f"Score: {gs.score}", (20, 245), 0.8, 2)
+    if gs.best_time is not None:
+        draw_text(frame, f"Melhor: {gs.best_time:0.3f}s", (20, 280), 0.8, 2)
+
+    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
+    return frame
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -400,6 +570,7 @@ def main() -> None:
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, LARGURA_CAMARA)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, ALTURA_CAMARA)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     cv2.namedWindow(NOME_JANELA, cv2.WINDOW_NORMAL)
 
@@ -407,12 +578,14 @@ def main() -> None:
     logo = bank.logo
 
     face_tracker = FaceTracker()
+    hand_tracker = HandTracker()
 
     mode = Mode.MENU
     menu = MenuState()
     menu_reset(menu)
 
     catcher: Optional[CatcherState] = None
+    guns: Optional[GunslingerState] = None
 
     t0 = now_s()
 
@@ -495,6 +668,17 @@ def main() -> None:
                     catcher = CatcherState(start_t=now_s())
                 else:
                     mode = Mode.GUN
+                    alvo, proximo, kind = gunslinger_new_target(w, h, bank)
+                    guns = GunslingerState(
+                        phase="WAIT",
+                        score=0,
+                        best_time=None,
+                        signal_t=0.0,
+                        next_signal_t=proximo,
+                        target=alvo,
+                        target_kind=kind,
+                        last_shot_t=0.0,
+                    )
 
         elif mode == Mode.FRUIT:
             assert catcher is not None
@@ -505,11 +689,13 @@ def main() -> None:
                 catcher = None
 
         elif mode == Mode.GUN:
-            draw_text(frame, "Gunslinger (WIP)", (20, 140), 1.0, 2)
-            draw_text(frame, "Q: voltar ao menu", (20, 180), 0.7, 2)
+            assert guns is not None
+            mao = hand_tracker.process(frame_track)
+            frame = run_gunslinger(frame, mao, guns, bank)
             if key in (ord("q"), ord("Q")):
                 mode = Mode.MENU
                 menu_reset(menu)
+                guns = None
 
         if face.has_face:
             cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
