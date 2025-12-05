@@ -1,7 +1,8 @@
 from __future__ import annotations
 import time
+import random
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import cv2
 import numpy as np
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ import mediapipe as mp
 CAMERA_INDEX = 0
 WINDOW_NAME = "Fruit Arcade"
 FLIP_CAMERA = True
+
 ASSETS_DIR = (Path(__file__).resolve().parent.parent / "assets")
 
 MENU_DX = 0.07
@@ -26,6 +28,16 @@ CALIBRATION_S = 0.9
 MENU_CONFIRM_BY_MOUTH = True
 MENU_MOUTH_THRESHOLD = 0.055
 MENU_MOUTH_HOLD_S = 0.22
+
+CATCHER_ROUND_S = 45
+FRUIT_FALL_SPEED_PX = 4.2
+FRUIT_FALL_SPEED_INC = 0.02
+FRUIT_SPAWN_EVERY_S = (0.45, 0.90)
+BASKET_W = 160
+BASKET_H = 30
+
+ENABLE_MOUTH_TO_CATCH = False
+MOUTH_OPEN_THRESHOLD = 0.055
 
 # ----------------------------
 # Utilitários
@@ -275,6 +287,88 @@ def menu_exit(ms: MenuState) -> bool:
     return ms.t_hold_exit is not None and (now_s() - ms.t_hold_exit) >= HOLD_EXIT_S
 
 
+@dataclass
+class Fruit:
+    x: float
+    y: float
+    r: int
+    kind: str
+    vy: float
+
+
+@dataclass
+class CatcherState:
+    start_t: float
+    score: int = 0
+    fruits: List[Fruit] = field(default_factory=list)
+    next_spawn_t: float = 0.0
+    speed: float = FRUIT_FALL_SPEED_PX
+    mouth_required: bool = ENABLE_MOUTH_TO_CATCH
+
+
+def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
+    r = random.randint(20, 32)
+    x = random.randint(r + 10, w - r - 10)
+    kind = random.choice(bank.fruit_keys) if bank.fruit_keys else "orange"
+    cs.fruits.append(Fruit(x=float(x), y=float(-r), r=r, kind=kind, vy=cs.speed))
+    cs.speed += FRUIT_FALL_SPEED_INC
+
+
+def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank: SpriteBank) -> Tuple[np.ndarray, bool]:
+    h, w = frame.shape[:2]
+    t = now_s()
+    remaining = max(0.0, CATCHER_ROUND_S - (t - cs.start_t))
+
+    bx = int(clamp(face.nose[0], 0.0, 1.0) * w) if face.has_face else w // 2
+    basket_x1 = int(clamp(bx - BASKET_W // 2, 0, w - BASKET_W))
+    basket_y1 = h - 70
+    basket_x2 = basket_x1 + BASKET_W
+    basket_y2 = basket_y1 + BASKET_H
+
+    basket_active = (not cs.mouth_required) or (face.mouth_open >= MOUTH_OPEN_THRESHOLD)
+
+    if t >= cs.next_spawn_t:
+        spawn_fruit(cs, w, bank)
+        cs.next_spawn_t = t + random.uniform(*FRUIT_SPAWN_EVERY_S)
+
+    new_fruits: List[Fruit] = []
+    for f in cs.fruits:
+        f.y += f.vy
+
+        if basket_active:
+            cx = clamp(f.x, basket_x1, basket_x2)
+            cy = clamp(f.y, basket_y1, basket_y2)
+            if (f.x - cx) ** 2 + (f.y - cy) ** 2 <= f.r ** 2:
+                cs.score += 1
+                continue
+
+        if f.y - f.r > h + 10:
+            continue
+
+        new_fruits.append(f)
+    cs.fruits = new_fruits
+
+    for f in cs.fruits:
+        bank.draw_fruit(frame, f.kind, (int(f.x), int(f.y)), size_px=f.r * 2)
+
+    basket_col = (80, 255, 80) if basket_active else (80, 80, 255)
+    cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), basket_col, -1)
+    cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), (255, 255, 255), 2)
+
+    draw_text(frame, f"FRUIT CATCHER  |  Score: {cs.score}", (20, 140), 0.9, 2)
+    draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
+    draw_text(frame, "Q: voltar ao menu", (20, h - 20), 0.6, 2)
+
+    done = remaining <= 0.0
+    if done:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.55, frame, 0.45, 0.0)
+        draw_text(frame, f"Fim! Pontuacao: {cs.score}", (w // 2 - 190, h // 2), 0.9, 2)
+
+    return frame, done
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -286,7 +380,6 @@ def main() -> None:
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
-    # logo = load_png_rgba(str(ASSETS_DIR / "logo.png"))
     bank = SpriteBank()
     logo = bank.logo
 
@@ -295,6 +388,8 @@ def main() -> None:
     mode = Mode.MENU
     menu = MenuState()
     menu_reset(menu)
+
+    catcher: Optional[CatcherState] = None
 
     t0 = now_s()
 
@@ -367,15 +462,17 @@ def main() -> None:
             if do_confirm:
                 if menu.selected == 0:
                     mode = Mode.FRUIT
+                    catcher = CatcherState(start_t=now_s())
                 else:
                     mode = Mode.GUN
 
         elif mode == Mode.FRUIT:
-            draw_text(frame, "Fruit Catcher (WIP)", (20, 140), 1.0, 2)
-            draw_text(frame, "Q: voltar ao menu", (20, 180), 0.7, 2)
-            if key in (ord("q"), ord("Q")):
+            assert catcher is not None
+            frame, done = run_fruit_catcher(frame, face, catcher, bank)
+            if key in (ord("q"), ord("Q")) or (done and key in (13, 10)):
                 mode = Mode.MENU
                 menu_reset(menu)
+                catcher = None
 
         elif mode == Mode.GUN:
             draw_text(frame, "Gunslinger (WIP)", (20, 140), 1.0, 2)
