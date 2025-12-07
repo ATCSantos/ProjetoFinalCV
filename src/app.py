@@ -35,6 +35,15 @@ MENU_CONFIRM_BY_MOUTH = True
 MENU_MOUTH_THRESHOLD = 0.055
 MENU_MOUTH_HOLD_S = 0.22
 
+# menu (mais exigente a confirmar)
+MENU_DY_CONFIRMAR = 0.12
+MENU_CONFIRM_MAX_DX = 0.04
+MENU_DY_SAIR = 0.10
+MENU_SAIR_MAX_DX = 0.06
+MENU_NEUTRO_DX = 0.02
+MENU_NEUTRO_DY = 0.02
+MENU_ARMAR_S = 0.40
+
 CATCHER_ROUND_S = 45
 FRUIT_FALL_SPEED_PX = 4.2
 FRUIT_FALL_SPEED_INC = 0.02
@@ -321,6 +330,8 @@ class MenuState:
     t_hold_exit: Optional[float] = None
     t_mouth_confirm: Optional[float] = None
 
+    ultimo_neutro_t: float = 0.0
+
 
 def menu_reset(ms: MenuState) -> None:
     ms.baseline = None
@@ -331,10 +342,14 @@ def menu_reset(ms: MenuState) -> None:
     ms.t_hold_confirm = None
     ms.t_hold_exit = None
     ms.t_mouth_confirm = None
+    ms.ultimo_neutro_t = now_s()
 
 
 def menu_update(ms: MenuState, face: FaceData) -> None:
     if not face.has_face:
+        ms.t_hold_confirm = None
+        ms.t_hold_exit = None
+        ms.t_mouth_confirm = None
         return
 
     n = np.array(face.nose, dtype=np.float64)
@@ -345,14 +360,18 @@ def menu_update(ms: MenuState, face: FaceData) -> None:
         if now_s() - ms.calib_start >= CALIBRATION_S and ms.sample_count > 0:
             ms.baseline = tuple((ms.sample_sum / ms.sample_count).tolist())
             ms.is_calibrating = False
+        ms.t_hold_confirm = None
+        ms.t_hold_exit = None
+        ms.t_mouth_confirm = None
+        ms.ultimo_neutro_t = now_s()
         return
 
     if ms.baseline is None:
         return
 
     bx, by = ms.baseline
-    dx = n[0] - bx
-    dy = n[1] - by
+    dx = float(n[0] - bx)
+    dy = float(n[1] - by)
     t = now_s()
 
     if dx < -MENU_DX:
@@ -360,17 +379,22 @@ def menu_update(ms: MenuState, face: FaceData) -> None:
     elif dx > MENU_DX:
         ms.selected = 1
 
-    if dy < -MENU_DY:
+    if abs(dx) <= MENU_NEUTRO_DX and abs(dy) <= MENU_NEUTRO_DY:
+        ms.ultimo_neutro_t = t
+
+    armado = (t - ms.ultimo_neutro_t) <= MENU_ARMAR_S
+
+    if armado and (dy < -MENU_DY_CONFIRMAR) and (abs(dx) <= MENU_CONFIRM_MAX_DX):
         ms.t_hold_confirm = ms.t_hold_confirm or t
     else:
         ms.t_hold_confirm = None
 
-    if dy > MENU_DY:
+    if armado and (dy > MENU_DY_SAIR) and (abs(dx) <= MENU_SAIR_MAX_DX):
         ms.t_hold_exit = ms.t_hold_exit or t
     else:
         ms.t_hold_exit = None
 
-    if MENU_CONFIRM_BY_MOUTH and face.mouth_open >= MENU_MOUTH_THRESHOLD:
+    if MENU_CONFIRM_BY_MOUTH and armado and (abs(dx) <= MENU_CONFIRM_MAX_DX) and face.mouth_open >= MENU_MOUTH_THRESHOLD:
         ms.t_mouth_confirm = ms.t_mouth_confirm or t
     else:
         ms.t_mouth_confirm = None
