@@ -26,7 +26,6 @@ TRACK_CADA_N_FRAMES = 2
 PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
 MENU_DX = 0.07
-MENU_DY = 0.07
 
 MENU_DY_CONFIRM = 0.11
 MENU_DY_EXIT = 0.13
@@ -134,14 +133,14 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
     if a.min() == 0 and a.max() == 0:
         return
 
-    src_rgb = src_roi[:, :, :3].astype(np.uint16)
-    roi_u = roi.astype(np.uint16)
-
     if a.min() == 255:
         roi[:, :] = src_roi[:, :, :3]
         return
 
+    src_rgb = src_roi[:, :, :3].astype(np.uint16)
+    roi_u = roi.astype(np.uint16)
     inv = (255 - a).astype(np.uint16)
+
     out = (src_rgb * a[:, :, None] + roi_u * inv[:, :, None]) // 255
     roi[:, :] = out.astype(np.uint8)
 
@@ -626,8 +625,8 @@ def main() -> None:
     guns: Optional[GunslingerState] = None
 
     t0 = now_s()
-    contador_frames = 0
-    ultimo_face = FaceData((0.5, 0.5), 0.0, False)
+    frame_count = 0
+    face_mem = FaceData((0.5, 0.5), 0.0, False)
 
     while True:
         ok, frame = cap.read()
@@ -648,15 +647,19 @@ def main() -> None:
         else:
             frame_track = frame
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:
-            break
-
         if mode != Mode.GUN:
-            contador_frames += 1
-            if TRACK_CADA_N_FRAMES <= 1 or (contador_frames % TRACK_CADA_N_FRAMES) == 0 or (not ultimo_face.has_face):
-                ultimo_face = face_tracker.process(frame_track)
-        face = ultimo_face if mode != Mode.GUN else FaceData((0.5, 0.5), 0.0, False)
+            frame_count += 1
+            if TRACK_CADA_N_FRAMES <= 1 or (frame_count % TRACK_CADA_N_FRAMES) == 0 or (not face_mem.has_face):
+                face_mem = face_tracker.process(frame_track)
+            face = face_mem
+        else:
+            face = FaceData((0.5, 0.5), 0.0, False)
+
+        mao: Optional[HandData] = None
+        if mode == Mode.GUN:
+            mao = hand_tracker.process(frame_track)
+
+        done_fruit = False
 
         if mode == Mode.MENU:
             menu_update(menu, face)
@@ -701,6 +704,35 @@ def main() -> None:
             if menu.is_calibrating:
                 draw_text(frame, "A calibrar... olha em frente", (20, h - 55), 0.65, 2)
 
+        elif mode == Mode.FRUIT:
+            assert catcher is not None
+            frame, done_fruit = run_fruit_catcher(frame, face, catcher, bank)
+
+        elif mode == Mode.GUN:
+            assert guns is not None
+            frame = run_gunslinger(frame, mao, guns, bank)
+
+        if face.has_face and mode != Mode.GUN:
+            cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
+            cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
+            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
+
+        draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
+        draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
+
+        if mode == Mode.MENU:
+            draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
+        else:
+            draw_text(frame, "ESC: sair  |  Q: menu", (20, h - 20), 0.65, 2)
+
+        cv2.imshow(NOME_JANELA, frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            break
+
+        if mode == Mode.MENU:
             if key in (ord("r"), ord("R")):
                 menu_reset(menu)
 
@@ -727,37 +759,16 @@ def main() -> None:
                     )
 
         elif mode == Mode.FRUIT:
-            assert catcher is not None
-            frame, done = run_fruit_catcher(frame, face, catcher, bank)
-            if key in (ord("q"), ord("Q")) or (done and key in (13, 10)):
+            if key in (ord("q"), ord("Q")) or (done_fruit and key in (13, 10)):
                 mode = Mode.MENU
                 menu_reset(menu)
                 catcher = None
 
         elif mode == Mode.GUN:
-            assert guns is not None
-            mao = hand_tracker.process(frame_track)
-            frame = run_gunslinger(frame, mao, guns, bank)
             if key in (ord("q"), ord("Q")):
                 mode = Mode.MENU
                 menu_reset(menu)
                 guns = None
-
-        if face.has_face and mode != Mode.GUN:
-            cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
-            cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
-            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
-            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
-
-        draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
-        draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
-
-        if mode == Mode.MENU:
-            draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
-        else:
-            draw_text(frame, "ESC: sair  |  Q: menu", (20, h - 20), 0.65, 2)
-
-        cv2.imshow(NOME_JANELA, frame)
 
     cap.release()
     cv2.destroyAllWindows()
