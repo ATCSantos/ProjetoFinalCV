@@ -27,22 +27,20 @@ PASTA_ASSETS = (Path(__file__).resolve().parent.parent / "assets")
 
 MENU_DX = 0.07
 MENU_DY = 0.07
-HOLD_CONFIRM_S = 0.22
-HOLD_EXIT_S = 0.35
+
+MENU_DY_CONFIRM = 0.11
+MENU_DY_EXIT = 0.13
+MENU_DX_STABLE = 0.04
+MENU_VERTICAL_RATIO = 1.8
+MENU_REARM_DY = 0.03
+
+HOLD_CONFIRM_S = 0.35
+HOLD_EXIT_S = 0.60
 CALIBRATION_S = 0.9
 
 MENU_CONFIRM_BY_MOUTH = True
 MENU_MOUTH_THRESHOLD = 0.055
 MENU_MOUTH_HOLD_S = 0.22
-
-# menu (mais exigente a confirmar)
-MENU_DY_CONFIRMAR = 0.12
-MENU_CONFIRM_MAX_DX = 0.04
-MENU_DY_SAIR = 0.10
-MENU_SAIR_MAX_DX = 0.06
-MENU_NEUTRO_DX = 0.02
-MENU_NEUTRO_DY = 0.02
-MENU_ARMAR_S = 0.40
 
 CATCHER_ROUND_S = 45
 FRUIT_FALL_SPEED_PX = 4.2
@@ -50,6 +48,7 @@ FRUIT_FALL_SPEED_INC = 0.02
 FRUIT_SPAWN_EVERY_S = (0.45, 0.90)
 BASKET_W = 160
 BASKET_H = 30
+MAX_FRUTAS_ECRA = 22
 
 ENABLE_MOUTH_TO_CATCH = False
 MOUTH_OPEN_THRESHOLD = 0.055
@@ -128,11 +127,22 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
     roi = dst_bgr[y1:y2, x1:x2]
     src_roi = src[sy1:sy2, sx1:sx2]
 
-    alpha = (src_roi[:, :, 3:4].astype(np.float32) / 255.0)
-    src_rgb = src_roi[:, :, :3].astype(np.float32)
-    roi_f = roi.astype(np.float32)
+    a = src_roi[:, :, 3].astype(np.uint16)
+    if a.size == 0:
+        return
 
-    out = src_rgb * alpha + roi_f * (1.0 - alpha)
+    if a.min() == 0 and a.max() == 0:
+        return
+
+    src_rgb = src_roi[:, :, :3].astype(np.uint16)
+    roi_u = roi.astype(np.uint16)
+
+    if a.min() == 255:
+        roi[:, :] = src_roi[:, :, :3]
+        return
+
+    inv = (255 - a).astype(np.uint16)
+    out = (src_rgb * a[:, :, None] + roi_u * inv[:, :, None]) // 255
     roi[:, :] = out.astype(np.uint8)
 
 
@@ -329,8 +339,7 @@ class MenuState:
     t_hold_confirm: Optional[float] = None
     t_hold_exit: Optional[float] = None
     t_mouth_confirm: Optional[float] = None
-
-    ultimo_neutro_t: float = 0.0
+    armed: bool = True
 
 
 def menu_reset(ms: MenuState) -> None:
@@ -342,14 +351,11 @@ def menu_reset(ms: MenuState) -> None:
     ms.t_hold_confirm = None
     ms.t_hold_exit = None
     ms.t_mouth_confirm = None
-    ms.ultimo_neutro_t = now_s()
+    ms.armed = True
 
 
 def menu_update(ms: MenuState, face: FaceData) -> None:
     if not face.has_face:
-        ms.t_hold_confirm = None
-        ms.t_hold_exit = None
-        ms.t_mouth_confirm = None
         return
 
     n = np.array(face.nose, dtype=np.float64)
@@ -360,42 +366,50 @@ def menu_update(ms: MenuState, face: FaceData) -> None:
         if now_s() - ms.calib_start >= CALIBRATION_S and ms.sample_count > 0:
             ms.baseline = tuple((ms.sample_sum / ms.sample_count).tolist())
             ms.is_calibrating = False
-        ms.t_hold_confirm = None
-        ms.t_hold_exit = None
-        ms.t_mouth_confirm = None
-        ms.ultimo_neutro_t = now_s()
+            ms.armed = True
         return
 
     if ms.baseline is None:
         return
 
     bx, by = ms.baseline
-    dx = float(n[0] - bx)
-    dy = float(n[1] - by)
+    dx = n[0] - bx
+    dy = n[1] - by
     t = now_s()
+
+    if abs(dy) < MENU_REARM_DY:
+        ms.armed = True
 
     if dx < -MENU_DX:
         ms.selected = 0
     elif dx > MENU_DX:
         ms.selected = 1
 
-    if abs(dx) <= MENU_NEUTRO_DX and abs(dy) <= MENU_NEUTRO_DY:
-        ms.ultimo_neutro_t = t
+    vertical_ok = (abs(dx) <= MENU_DX_STABLE) and (abs(dy) > abs(dx) * MENU_VERTICAL_RATIO)
 
-    armado = (t - ms.ultimo_neutro_t) <= MENU_ARMAR_S
-
-    if armado and (dy < -MENU_DY_CONFIRMAR) and (abs(dx) <= MENU_CONFIRM_MAX_DX):
-        ms.t_hold_confirm = ms.t_hold_confirm or t
+    want_confirm = vertical_ok and (dy < -MENU_DY_CONFIRM)
+    if want_confirm:
+        if ms.t_hold_confirm is None:
+            if ms.armed:
+                ms.t_hold_confirm = t
+                ms.armed = False
     else:
         ms.t_hold_confirm = None
 
-    if armado and (dy > MENU_DY_SAIR) and (abs(dx) <= MENU_SAIR_MAX_DX):
-        ms.t_hold_exit = ms.t_hold_exit or t
+    want_exit = vertical_ok and (dy > MENU_DY_EXIT)
+    if want_exit:
+        if ms.t_hold_exit is None:
+            if ms.armed:
+                ms.t_hold_exit = t
+                ms.armed = False
     else:
         ms.t_hold_exit = None
 
-    if MENU_CONFIRM_BY_MOUTH and armado and (abs(dx) <= MENU_CONFIRM_MAX_DX) and face.mouth_open >= MENU_MOUTH_THRESHOLD:
-        ms.t_mouth_confirm = ms.t_mouth_confirm or t
+    if MENU_CONFIRM_BY_MOUTH and face.mouth_open >= MENU_MOUTH_THRESHOLD:
+        if ms.t_mouth_confirm is None:
+            if ms.armed:
+                ms.t_mouth_confirm = t
+                ms.armed = False
     else:
         ms.t_mouth_confirm = None
 
@@ -430,6 +444,8 @@ class CatcherState:
 
 
 def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
+    if len(cs.fruits) >= MAX_FRUTAS_ECRA:
+        return
     r = random.randint(20, 32)
     x = random.randint(r + 10, w - r - 10)
     kind = random.choice(bank.fruit_keys) if bank.fruit_keys else "orange"
@@ -480,7 +496,6 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
 
     draw_text(frame, f"FRUIT CATCHER  |  Score: {cs.score}", (20, 140), 0.9, 2)
     draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
-    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
 
     done = remaining <= 0.0
     if done:
@@ -579,7 +594,6 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
     if gs.best_time is not None:
         draw_text(frame, f"Melhor: {gs.best_time:0.3f}s", (20, 280), 0.8, 2)
 
-    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
     return frame
 
 
@@ -626,7 +640,11 @@ def main() -> None:
         h, w = frame.shape[:2]
 
         if ESCALA_TRACKING != 1.0:
-            frame_track = cv2.resize(frame, (int(w * ESCALA_TRACKING), int(h * ESCALA_TRACKING)), interpolation=cv2.INTER_AREA)
+            frame_track = cv2.resize(
+                frame,
+                (int(w * ESCALA_TRACKING), int(h * ESCALA_TRACKING)),
+                interpolation=cv2.INTER_AREA
+            )
         else:
             frame_track = frame
 
@@ -642,7 +660,6 @@ def main() -> None:
 
         if mode == Mode.MENU:
             menu_update(menu, face)
-
 
             if logo is not None:
                 target_w = int(w * 0.42)
@@ -732,12 +749,13 @@ def main() -> None:
             cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
             cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
 
-        #texto por cima
         draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
         draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
-        if mode != Mode.GUN:
-            draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
-        draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
+
+        if mode == Mode.MENU:
+            draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
+        else:
+            draw_text(frame, "ESC: sair  |  Q: menu", (20, h - 20), 0.65, 2)
 
         cv2.imshow(NOME_JANELA, frame)
 
