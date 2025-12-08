@@ -37,8 +37,10 @@ MENU_MOUTH_HOLD_S = 0.22
 
 # Hard Mode (toggle no menu)
 MENU_HARD_GESTO = "THUMBS"
-MENU_HARD_HOLD_S = 0.30
+MENU_HARD_HOLD_S = 0.80
 MENU_HARD_COOLDOWN_S = 0.60
+MENU_HARD_FLASH_S = 0.90
+MENU_HARD_GRACE_S = 0.14  # tolerância a falhas rápidas no tracking
 
 # Fruit Catcher
 CATCHER_ROUND_S = 45
@@ -52,7 +54,8 @@ ENABLE_MOUTH_TO_CATCH = False
 MOUTH_OPEN_THRESHOLD = 0.055
 
 # Olhos fechados (Hard Mode)
-EYES_CLOSED_THRESHOLD = 0.18
+EYES_CLOSED_RATIO = 0.75
+EYES_CLOSED_HOLD_S = 0.15
 
 # Gunslinger
 GUN_ROUND_TIMEOUT_S = 2.5
@@ -60,7 +63,7 @@ SIGNAL_DELAY_S = (1.0, 2.6)
 TARGET_RADIUS = 60
 SHOT_COOLDOWN_S = 0.7
 
-# Gunslinger Hard Mode (ideia simples)
+# Gunslinger Hard Mode
 GUN_ROUND_TIMEOUT_HARD_S = 1.9
 TARGET_RADIUS_HARD = 45
 GUN_GESTO_HARD = "POINT"
@@ -85,6 +88,11 @@ def draw_text(img: np.ndarray, text: str, org: Tuple[int, int], scale: float = 0
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(img, text, (org[0] + 2, org[1] + 2), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
     cv2.putText(img, text, org, font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+def overlay_tint(frame: np.ndarray, bgr: Tuple[int, int, int], alpha: float) -> np.ndarray:
+    overlay = frame.copy()
+    overlay[:, :] = bgr
+    return cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0.0)
 
 # ----------------------------
 # PNG BGRA + overlay alpha
@@ -161,7 +169,6 @@ class FaceTracker:
     LEFT_EYE_OUTER = 33
     RIGHT_EYE_OUTER = 263
 
-    # olhos (pálpebras) - indices comuns do FaceMesh
     L_EYE_OUT = 33
     L_EYE_IN = 133
     L_EYE_UP = 159
@@ -268,17 +275,23 @@ class HandTracker:
     def _finger_extended(self, lm, tip_i: int, pip_i: int) -> bool:
         return lm[tip_i].y < lm[pip_i].y
 
-    def _thumb_extended(self, lm, label: str) -> bool:
-        if label == "Right":
-            return lm[self.THUMB_TIP].x > lm[self.THUMB_IP].x
-        return lm[self.THUMB_TIP].x < lm[self.THUMB_IP].x
+    def _thumbs_up(self, lm) -> bool:
+        # thumbs-up vertical: tip bem acima do IP
+        return lm[self.THUMB_TIP].y < (lm[self.THUMB_IP].y - 0.015)
 
-    def _classify(self, lm, label: str) -> str:
-        thumb = self._thumb_extended(lm, label)
+    def _thumb_side(self, lm) -> bool:
+        # fallback (casos em que a mão aparece de lado)
+        return abs(lm[self.THUMB_TIP].x - lm[self.THUMB_IP].x) > 0.040
+
+    def _classify(self, lm) -> str:
         index_ = self._finger_extended(lm, self.INDEX_TIP, self.INDEX_PIP)
         middle = self._finger_extended(lm, self.MIDDLE_TIP, self.MIDDLE_PIP)
         ring = self._finger_extended(lm, self.RING_TIP, self.RING_PIP)
         pinky = self._finger_extended(lm, self.PINKY_TIP, self.PINKY_PIP)
+
+        thumb_up = self._thumbs_up(lm)
+        thumb_side = self._thumb_side(lm)
+        thumb = thumb_up or thumb_side
 
         extended = [thumb, index_, middle, ring, pinky]
         cnt = sum(1 for v in extended if v)
@@ -291,6 +304,10 @@ class HandTracker:
             return "POINT"
         if index_ and middle and (not ring) and (not pinky):
             return "PEACE"
+        # THUMBS UP: polegar "up" + restantes fechados (ou quase)
+        if thumb_up and (not index_) and (not middle) and (not ring) and (not pinky):
+            return "THUMBS"
+        # fallback thumb “isolado”
         if thumb and (not index_) and (not middle) and (not ring) and (not pinky):
             return "THUMBS"
         return "OTHER"
@@ -307,7 +324,7 @@ class HandTracker:
         lm = res.multi_hand_landmarks[0].landmark
         label = res.multi_handedness[0].classification[0].label
         tip = (lm[self.INDEX_TIP].x, lm[self.INDEX_TIP].y)
-        gesto = self._classify(lm, label)
+        gesto = self._classify(lm)
         return HandData(tip=tip, label=label, gesture=gesto)
 
 
@@ -364,7 +381,10 @@ class MenuState:
     calib_start: float = 0.0
     is_calibrating: bool = True
     sample_sum: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float64))
+    sample_eyes_sum: float = 0.0
     sample_count: int = 0
+
+    baseline_eyes_open: float = 0.30
 
     selected: int = 0
     t_hold_confirm: Optional[float] = None
@@ -373,7 +393,10 @@ class MenuState:
 
     hard_mode: bool = False
     t_hard_hold: Optional[float] = None
+    t_hard_last_seen: float = 0.0
     t_hard_cooldown: float = 0.0
+    hard_flash_until: float = 0.0
+    hard_flash_txt: str = ""
 
 
 def menu_reset(ms: MenuState) -> None:
@@ -381,11 +404,13 @@ def menu_reset(ms: MenuState) -> None:
     ms.calib_start = now_s()
     ms.is_calibrating = True
     ms.sample_sum[:] = 0.0
+    ms.sample_eyes_sum = 0.0
     ms.sample_count = 0
     ms.t_hold_confirm = None
     ms.t_hold_exit = None
     ms.t_mouth_confirm = None
     ms.t_hard_hold = None
+    ms.t_hard_last_seen = 0.0
 
 
 def menu_update(ms: MenuState, face: FaceData, mao: Optional[HandData]) -> None:
@@ -397,9 +422,11 @@ def menu_update(ms: MenuState, face: FaceData, mao: Optional[HandData]) -> None:
 
     if ms.is_calibrating:
         ms.sample_sum += n
+        ms.sample_eyes_sum += float(face.eyes_open)
         ms.sample_count += 1
         if now_s() - ms.calib_start >= CALIBRATION_S and ms.sample_count > 0:
             ms.baseline = tuple((ms.sample_sum / ms.sample_count).tolist())
+            ms.baseline_eyes_open = float(ms.sample_eyes_sum / ms.sample_count)
             ms.is_calibrating = False
         ms.t_hard_hold = None
         return
@@ -437,14 +464,22 @@ def menu_update(ms: MenuState, face: FaceData, mao: Optional[HandData]) -> None:
     else:
         ms.t_mouth_confirm = None
 
-    if mao is not None and mao.gesture == MENU_HARD_GESTO and (t - ms.t_hard_cooldown) >= MENU_HARD_COOLDOWN_S:
-        ms.t_hard_hold = ms.t_hard_hold or t
-        if ms.t_hard_hold is not None and (t - ms.t_hard_hold) >= MENU_HARD_HOLD_S:
-            ms.hard_mode = not ms.hard_mode
-            ms.t_hard_cooldown = t
-            ms.t_hard_hold = None
+    # toggle hard mode (com tolerância a tracking instável)
+    if mao is not None and mao.gesture == MENU_HARD_GESTO:
+        ms.t_hard_last_seen = t
+        if (t - ms.t_hard_cooldown) >= MENU_HARD_COOLDOWN_S:
+            ms.t_hard_hold = ms.t_hard_hold or t
+            if ms.t_hard_hold is not None and (t - ms.t_hard_hold) >= MENU_HARD_HOLD_S:
+                ms.hard_mode = not ms.hard_mode
+                ms.t_hard_cooldown = t
+                ms.t_hard_hold = None
+                ms.hard_flash_until = t + MENU_HARD_FLASH_S
+                ms.hard_flash_txt = "HARD MODE: ON" if ms.hard_mode else "HARD MODE: OFF"
     else:
-        ms.t_hard_hold = None
+        if ms.t_hard_hold is not None and (t - ms.t_hard_last_seen) <= MENU_HARD_GRACE_S:
+            pass
+        else:
+            ms.t_hard_hold = None
 
 
 def menu_confirmed(ms: MenuState) -> bool:
@@ -474,6 +509,7 @@ class CatcherState:
     next_spawn_t: float = 0.0
     speed: float = FRUIT_FALL_SPEED_PX
     mouth_required: bool = ENABLE_MOUTH_TO_CATCH
+    t_olhos_fechados: Optional[float] = None
 
 
 def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
@@ -484,7 +520,7 @@ def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
     cs.speed += FRUIT_FALL_SPEED_INC
 
 
-def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank: SpriteBank, hard_mode: bool) -> Tuple[np.ndarray, bool]:
+def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank: SpriteBank, hard_mode: bool, eyes_base: float) -> Tuple[np.ndarray, bool]:
     h, w = frame.shape[:2]
     t = now_s()
     remaining = max(0.0, CATCHER_ROUND_S - (t - cs.start_t))
@@ -497,9 +533,17 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
 
     basket_active = (not cs.mouth_required) or (face.mouth_open >= MOUTH_OPEN_THRESHOLD)
 
-    olhos_fechados = face.has_face and (face.eyes_open <= EYES_CLOSED_THRESHOLD)
-    if hard_mode and (not olhos_fechados):
-        basket_active = False
+    eyes_thr = max(0.08, float(eyes_base) * EYES_CLOSED_RATIO)
+    olhos_fechados_raw = face.has_face and (face.eyes_open <= eyes_thr)
+
+    if hard_mode:
+        if olhos_fechados_raw:
+            cs.t_olhos_fechados = cs.t_olhos_fechados or t
+        else:
+            cs.t_olhos_fechados = None
+
+        olhos_fechados_ok = cs.t_olhos_fechados is not None and (t - cs.t_olhos_fechados) >= EYES_CLOSED_HOLD_S
+        basket_active = basket_active and olhos_fechados_ok
 
     if t >= cs.next_spawn_t:
         spawn_fruit(cs, w, bank)
@@ -529,14 +573,15 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
     cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), basket_col, -1)
     cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), (255, 255, 255), 2)
 
-    titulo = "FRUIT CATCHER"
-    if hard_mode:
-        titulo = "FRUIT CATCHER (HARD MODE)"
+    titulo = "FRUIT CATCHER" if not hard_mode else "FRUIT CATCHER (HARD MODE)"
     draw_text(frame, f"{titulo}  |  Score: {cs.score}", (20, 140), 0.9, 2)
     draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
 
     if hard_mode:
-        draw_text(frame, f"Olhos fechados: {'SIM' if olhos_fechados else 'NAO'}", (20, 210), 0.7, 2)
+        estado_olhos = "FECHADOS" if olhos_fechados_raw else "ABERTOS"
+        estado_cesto = "ATIVO" if basket_active else "BLOQUEADO"
+        draw_text(frame, f"Olhos: {estado_olhos}  (eyes:{face.eyes_open:0.3f} thr:{eyes_thr:0.3f})", (20, 210), 0.65, 2)
+        draw_text(frame, f"Cesto: {estado_cesto} (fecha {EYES_CLOSED_HOLD_S:0.2f}s)", (20, 242), 0.70, 2)
 
     draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
 
@@ -626,9 +671,7 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         gs.bloqueado_mao = False
         gs.t_mao_sumiu = None
 
-    titulo = "GUNSLINGER"
-    if hard_mode:
-        titulo = "GUNSLINGER (HARD MODE)"
+    titulo = "GUNSLINGER" if not hard_mode else "GUNSLINGER (HARD MODE)"
 
     if gs.phase == "WAIT":
         cv2.circle(frame, (tx, ty), raio, (140, 140, 140), -1, cv2.LINE_AA)
@@ -644,7 +687,9 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         bank.draw_fruit(frame, gs.target_kind, (tx, ty), size_px=raio * 2 - 6)
 
         if gs.bloqueado_mao:
-            draw_text(frame, "AGORA! (tira a mao do ecrã e volta a por)", (20, 140), 0.70, 2)
+            frame[:] = overlay_tint(frame, (0, 0, 255), 0.25)
+            draw_text(frame, "RETIRA A MAO DO ECRA!", (w // 2 - 230, h // 2 - 10), 1.0, 3)
+            draw_text(frame, "So depois podes disparar", (w // 2 - 215, h // 2 + 28), 0.8, 2)
         else:
             if hard_mode:
                 draw_text(frame, "AGORA! (só POINT) toca na fruta", (20, 140), 0.75, 2)
@@ -723,7 +768,11 @@ def main() -> None:
         h, w = frame.shape[:2]
 
         if ESCALA_TRACKING != 1.0:
-            frame_track = cv2.resize(frame, (int(w * ESCALA_TRACKING), int(h * ESCALA_TRACKING)), interpolation=cv2.INTER_AREA)
+            frame_track = cv2.resize(
+                frame,
+                (int(w * ESCALA_TRACKING), int(h * ESCALA_TRACKING)),
+                interpolation=cv2.INTER_AREA
+            )
         else:
             frame_track = frame
 
@@ -755,12 +804,6 @@ def main() -> None:
                 target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
                 logo_ok = bank.logo_scaled((target_w, target_h))
                 overlay_bgra(frame, logo_ok, (w // 2, int(h * 0.16)), (target_w, target_h))
-            else:
-                x1, y1 = w // 2 - 180, int(h * 0.06)
-                x2, y2 = w // 2 + 180, int(h * 0.22)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-                draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
 
             tile_w = w // 3
             tile_h = int(h * 0.35)
@@ -787,7 +830,18 @@ def main() -> None:
             draw_text(frame, "2) Gunslinger", (x3 + 22, y0 + tile_h - 45), 0.85, 2)
             draw_text(frame, "Indicador toca", (x3 + 22, y0 + tile_h - 18), 0.60, 2)
 
-            draw_text(frame, f"Hard Mode: {'ON' if menu.hard_mode else 'OFF'}  (faz {MENU_HARD_GESTO})", (20, 140), 0.70, 2)
+            draw_text(frame, f"HARD MODE: {'ON' if menu.hard_mode else 'OFF'}", (20, 140), 0.95, 3)
+            draw_text(frame, f"Toggle: thumbs up (segura {MENU_HARD_HOLD_S:0.1f}s)", (20, 175), 0.65, 2)
+
+            if menu.t_hard_hold is not None:
+                prog = clamp((now_s() - menu.t_hard_hold) / MENU_HARD_HOLD_S, 0.0, 1.0)
+                draw_text(frame, f"👍 a segurar: {prog*100:0.0f}%", (20, 205), 0.70, 2)
+            if mao_menu is not None:
+                draw_text(frame, f"gesto menu: {mao_menu.gesture}", (20, 235), 0.65, 2)
+
+            if now_s() < menu.hard_flash_until:
+                frame[:] = overlay_tint(frame, (0, 0, 0), 0.20)
+                draw_text(frame, menu.hard_flash_txt, (w // 2 - 230, 110), 1.0, 3)
 
             if menu.is_calibrating:
                 draw_text(frame, "A calibrar... olha em frente", (20, h - 55), 0.65, 2)
@@ -821,7 +875,7 @@ def main() -> None:
 
         elif mode == Mode.FRUIT:
             assert catcher is not None
-            frame, done = run_fruit_catcher(frame, face, catcher, bank, hard_mode=menu.hard_mode)
+            frame, done = run_fruit_catcher(frame, face, catcher, bank, hard_mode=menu.hard_mode, eyes_base=menu.baseline_eyes_open)
             if key in (ord("q"), ord("Q")) or (done and key in (13, 10)):
                 mode = Mode.MENU
                 menu_reset(menu)
