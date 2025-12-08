@@ -41,7 +41,6 @@ FRUIT_FALL_SPEED_INC = 0.02
 FRUIT_SPAWN_EVERY_S = (0.45, 0.90)
 BASKET_W = 160
 BASKET_H = 30
-MAX_FRUTAS_ECRA = 28
 
 ENABLE_MOUTH_TO_CATCH = False
 MOUTH_OPEN_THRESHOLD = 0.055
@@ -119,17 +118,6 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
 
     roi = dst_bgr[y1:y2, x1:x2]
     src_roi = src[sy1:sy2, sx1:sx2]
-
-    a = src_roi[:, :, 3].astype(np.uint8)
-
-    # curto-circuito: tudo transparente
-    if a.max() == 0:
-        return
-
-    # curto-circuito: tudo opaco
-    if a.min() == 255:
-        roi[:, :] = src_roi[:, :, :3]
-        return
 
     alpha = (src_roi[:, :, 3:4].astype(np.float32) / 255.0)
     src_rgb = src_roi[:, :, :3].astype(np.float32)
@@ -372,12 +360,13 @@ def menu_update(ms: MenuState, face: FaceData) -> None:
     elif dx > MENU_DX:
         ms.selected = 1
 
-    if dy < -MENU_DY:
+    # mais exigente (evita confirmar por “mexidas” pequenas)
+    if dy < -(MENU_DY * 1.7):
         ms.t_hold_confirm = ms.t_hold_confirm or t
     else:
         ms.t_hold_confirm = None
 
-    if dy > MENU_DY:
+    if dy > (MENU_DY * 1.7):
         ms.t_hold_exit = ms.t_hold_exit or t
     else:
         ms.t_hold_exit = None
@@ -424,9 +413,6 @@ def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
     cs.fruits.append(Fruit(x=float(x), y=float(-r), r=r, kind=kind, vy=cs.speed))
     cs.speed += FRUIT_FALL_SPEED_INC
 
-    if len(cs.fruits) > MAX_FRUTAS_ECRA:
-        cs.fruits = cs.fruits[-MAX_FRUTAS_ECRA:]
-
 
 def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank: SpriteBank) -> Tuple[np.ndarray, bool]:
     h, w = frame.shape[:2]
@@ -471,6 +457,7 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
 
     draw_text(frame, f"FRUIT CATCHER  |  Score: {cs.score}", (20, 140), 0.9, 2)
     draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
+    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
 
     done = remaining <= 0.0
     if done:
@@ -561,7 +548,7 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
     if mao is not None:
         hx = int(clamp(mao.tip[0], 0.0, 1.0) * w)
         hy = int(clamp(mao.tip[1], 0.0, 1.0) * h)
-        cv2.circle(frame, (hx, hy), 10, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, (hx, hy), 10, (255, 255, 255), -1)
         cv2.circle(frame, (hx, hy), 10, (0, 0, 0), 2)
         draw_text(frame, f"gesto: {mao.gesture}", (20, 210), 0.7, 2)
 
@@ -569,65 +556,13 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
     if gs.best_time is not None:
         draw_text(frame, f"Melhor: {gs.best_time:0.3f}s", (20, 280), 0.8, 2)
 
+    draw_text(frame, "Q: voltar ao menu", (20, h - 45), 0.6, 2)
     return frame
 
 
 # ----------------------------
 # Main
 # ----------------------------
-
-def desenhar_logo_ou_placeholder(frame: np.ndarray, bank: SpriteBank, w: int, h: int) -> None:
-    logo = bank.logo
-    if logo is not None:
-        target_w = int(w * 0.42)
-        target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
-        logo_ok = bank.logo_scaled((target_w, target_h))
-        if logo_ok is not None:
-            overlay_bgra(frame, logo_ok, (w // 2, int(h * 0.16)), (target_w, target_h))
-        return
-
-    x1, y1 = w // 2 - 180, int(h * 0.06)
-    x2, y2 = w // 2 + 180, int(h * 0.22)
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-    draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
-
-def desenhar_cartoes_menu(frame: np.ndarray, bank: SpriteBank, w: int, h: int, selecionado: int) -> None:
-    tile_w = w // 3
-    tile_h = int(h * 0.35)
-    y0 = int(h * 0.35)
-
-    x1 = w // 10
-    x2 = x1 + tile_w
-    x3 = w - w // 10 - tile_w
-    x4 = x3 + tile_w
-
-    cv2.rectangle(frame, (x1, y0), (x2, y0 + tile_h), (40, 160, 40), -1)
-    cv2.rectangle(frame, (x3, y0), (x4, y0 + tile_h), (40, 40, 160), -1)
-
-    bank.draw_fruit(frame, "banana", (x1 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
-    bank.draw_fruit(frame, "watermelon", (x3 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
-
-    if selecionado == 0:
-        cv2.rectangle(frame, (x1 - 6, y0 - 6), (x2 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
-    else:
-        cv2.rectangle(frame, (x3 - 6, y0 - 6), (x4 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
-
-    draw_text(frame, "1) Fruit Catcher", (x1 + 22, y0 + tile_h - 45), 0.85, 2)
-    draw_text(frame, "Nariz move", (x1 + 22, y0 + tile_h - 18), 0.60, 2)
-    draw_text(frame, "2) Gunslinger", (x3 + 22, y0 + tile_h - 45), 0.85, 2)
-    draw_text(frame, "Indicador toca", (x3 + 22, y0 + tile_h - 18), 0.60, 2)
-
-def desenhar_hud(frame: np.ndarray, modo: Mode, t0: float, h: int, face: FaceData) -> None:
-    draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
-    draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
-    if modo != Mode.GUN:
-        draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
-
-    if modo == Mode.MENU:
-        draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
-    else:
-        draw_text(frame, "ESC: sair | Q: menu", (20, h - 20), 0.65, 2)
 
 def main() -> None:
     cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -641,6 +576,8 @@ def main() -> None:
     cv2.namedWindow(NOME_JANELA, cv2.WINDOW_NORMAL)
 
     bank = SpriteBank()
+    logo = bank.logo
+
     face_tracker = FaceTracker()
     hand_tracker = HandTracker()
 
@@ -654,6 +591,9 @@ def main() -> None:
     t0 = now_s()
     contador_frames = 0
     ultimo_face = FaceData((0.5, 0.5), 0.0, False)
+
+    contador_frames_mao = 0
+    ultima_mao: Optional[HandData] = None
 
     while True:
         ok, frame = cap.read()
@@ -674,45 +614,67 @@ def main() -> None:
         else:
             frame_track = frame
 
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
+            break
+
         if mode != Mode.GUN:
             contador_frames += 1
             if TRACK_CADA_N_FRAMES <= 1 or (contador_frames % TRACK_CADA_N_FRAMES) == 0 or (not ultimo_face.has_face):
                 ultimo_face = face_tracker.process(frame_track)
         face = ultimo_face if mode != Mode.GUN else FaceData((0.5, 0.5), 0.0, False)
 
+        if mode == Mode.GUN:
+            contador_frames_mao += 1
+            if TRACK_CADA_N_FRAMES <= 1 or (contador_frames_mao % TRACK_CADA_N_FRAMES) == 0 or (ultima_mao is None):
+                ultima_mao = hand_tracker.process(frame_track)
+        else:
+            contador_frames_mao = 0
+            ultima_mao = None
+
         if mode == Mode.MENU:
             menu_update(menu, face)
 
-            desenhar_logo_ou_placeholder(frame, bank, w, h)
-            desenhar_cartoes_menu(frame, bank, w, h, menu.selected)
+            if logo is not None:
+                target_w = int(w * 0.42)
+                target_h = int(target_w * (logo.shape[0] / logo.shape[1]))
+                logo_ok = bank.logo_scaled((target_w, target_h))
+                overlay_bgra(frame, logo_ok, (w // 2, int(h * 0.16)), (target_w, target_h))
+            else:
+                x1, y1 = w // 2 - 180, int(h * 0.06)
+                x2, y2 = w // 2 + 180, int(h * 0.22)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (30, 30, 30), -1)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
+                draw_text(frame, "LOGO EM FALTA", (w // 2 - 135, int(h * 0.16)), 0.8, 2)
+
+            tile_w = w // 3
+            tile_h = int(h * 0.35)
+            y0 = int(h * 0.35)
+
+            x1 = w // 10
+            x2 = x1 + tile_w
+            x3 = w - w // 10 - tile_w
+            x4 = x3 + tile_w
+
+            cv2.rectangle(frame, (x1, y0), (x2, y0 + tile_h), (40, 160, 40), -1)
+            cv2.rectangle(frame, (x3, y0), (x4, y0 + tile_h), (40, 40, 160), -1)
+
+            bank.draw_fruit(frame, "banana", (x1 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
+            bank.draw_fruit(frame, "watermelon", (x3 + tile_w // 2, y0 + tile_h // 2 - 10), size_px=min(tile_w, tile_h) // 2)
+
+            if menu.selected == 0:
+                cv2.rectangle(frame, (x1 - 6, y0 - 6), (x2 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
+            else:
+                cv2.rectangle(frame, (x3 - 6, y0 - 6), (x4 + 6, y0 + tile_h + 6), (255, 255, 255), 3)
+
+            draw_text(frame, "1) Fruit Catcher", (x1 + 22, y0 + tile_h - 45), 0.85, 2)
+            draw_text(frame, "Nariz move", (x1 + 22, y0 + tile_h - 18), 0.60, 2)
+            draw_text(frame, "2) Gunslinger", (x3 + 22, y0 + tile_h - 45), 0.85, 2)
+            draw_text(frame, "Indicador toca", (x3 + 22, y0 + tile_h - 18), 0.60, 2)
 
             if menu.is_calibrating:
                 draw_text(frame, "A calibrar... olha em frente", (20, h - 55), 0.65, 2)
 
-        elif mode == Mode.FRUIT:
-            assert catcher is not None
-            frame, done = run_fruit_catcher(frame, face, catcher, bank)
-
-        elif mode == Mode.GUN:
-            assert guns is not None
-            mao = hand_tracker.process(frame_track)
-            frame = run_gunslinger(frame, mao, guns, bank)
-
-        if face.has_face and mode != Mode.GUN:
-            cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
-            cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
-            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
-            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
-
-        desenhar_hud(frame, mode, t0, h, face)
-
-        cv2.imshow(NOME_JANELA, frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == 27:
-            break
-
-        if mode == Mode.MENU:
             if key in (ord("r"), ord("R")):
                 menu_reset(menu)
 
@@ -724,7 +686,6 @@ def main() -> None:
                 if menu.selected == 0:
                     mode = Mode.FRUIT
                     catcher = CatcherState(start_t=now_s())
-                    guns = None
                 else:
                     mode = Mode.GUN
                     alvo, proximo, kind = gunslinger_new_target(w, h, bank)
@@ -738,19 +699,36 @@ def main() -> None:
                         target_kind=kind,
                         last_shot_t=0.0,
                     )
-                    catcher = None
 
         elif mode == Mode.FRUIT:
+            assert catcher is not None
+            frame, done = run_fruit_catcher(frame, face, catcher, bank)
             if key in (ord("q"), ord("Q")) or (done and key in (13, 10)):
                 mode = Mode.MENU
                 menu_reset(menu)
                 catcher = None
 
         elif mode == Mode.GUN:
+            assert guns is not None
+            frame = run_gunslinger(frame, ultima_mao, guns, bank)
             if key in (ord("q"), ord("Q")):
                 mode = Mode.MENU
                 menu_reset(menu)
                 guns = None
+
+        if face.has_face and mode != Mode.GUN:
+            cx = int(clamp(face.nose[0], 0.0, 1.0) * w)
+            cy = int(clamp(face.nose[1], 0.0, 1.0) * h)
+            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2, cv2.LINE_AA)
+
+        draw_text(frame, "Fruit Arcade", (20, 40), 0.8, 2)
+        draw_text(frame, f"Uptime: {now_s() - t0:0.1f}s", (20, 75), 0.7, 2)
+        if mode != Mode.GUN:
+            draw_text(frame, f"mouth: {face.mouth_open:0.3f}", (20, 110), 0.65, 2)
+        draw_text(frame, "ESC: sair", (20, h - 20), 0.65, 2)
+
+        cv2.imshow(NOME_JANELA, frame)
 
     cap.release()
     cv2.destroyAllWindows()
