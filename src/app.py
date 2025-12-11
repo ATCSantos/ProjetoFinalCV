@@ -601,7 +601,7 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
     done = remaining <= 0.0
 
     if done:
-        frame = draw_end_screen(frame, "FIM!", f"Pontuação: {cs.score}")
+        frame = draw_end_screen(frame, "FIM!", f"Pontuacao: {cs.score}")
         return frame, True
 
     bx = int(clamp(face.nose[0], 0.0, 1.0) * w) if face.has_face else w // 2
@@ -980,9 +980,9 @@ def draw_menu(frame: np.ndarray, bank: SpriteBank, menu: MenuState, mao_menu: Op
         cv2.rectangle(frame, (bar_x1, bar_y1), (bar_x2, bar_y2), (255, 255, 255), 1)
         fill = int((bar_x2 - bar_x1) * prog)
         cv2.rectangle(frame, (bar_x1, bar_y1), (bar_x1 + fill, bar_y2), (255, 255, 255), -1)
-        draw_text(frame, f"👍 segurar {MENU_HARD_HOLD_S:0.1f}s", (bar_x1, bar_y2 + 22), 0.50, 2)
+        draw_text(frame, f"THUMBS UP segurar {MENU_HARD_HOLD_S:0.1f}s", (bar_x1, bar_y2 + 22), 0.50, 2)
     else:
-        draw_text(frame, f"👍 segurar {MENU_HARD_HOLD_S:0.1f}s p/ toggle", (m, int(header_h * 0.92)), 0.50, 2)
+        draw_text(frame, f"THUMBS UP segurar {MENU_HARD_HOLD_S:0.1f}s p/ toggle", (m, int(header_h * 0.92)), 0.50, 2)
 
     # tiles
     center_y1 = header_h + m
@@ -1040,7 +1040,7 @@ def draw_menu(frame: np.ndarray, bank: SpriteBank, menu: MenuState, mao_menu: Op
 def main() -> None:
     cap = cv2.VideoCapture(CAMERA_INDEX)
     if not cap.isOpened():
-        raise SystemExit("Não foi possível abrir a câmara (ajusta CAMERA_INDEX).")
+        raise SystemExit("Não foi possível abrir a camara (ajusta CAMERA_INDEX).")
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, LARGURA_CAMARA)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, ALTURA_CAMARA)
