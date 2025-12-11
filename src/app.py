@@ -376,6 +376,8 @@ class HandTracker:
 class SpriteBank:
     def __init__(self) -> None:
         self.logo = load_png_rgba(str(PASTA_ASSETS / "logo.png"))
+        self.menu_catcher = load_png_rgba(str(PASTA_ASSETS / "menu_catcher.png"))
+        self.menu_gunslinger = load_png_rgba(str(PASTA_ASSETS / "menu_gunslinger.png"))
         self.fruits = {
             "orange": load_png_rgba(str(PASTA_ASSETS / "orange.png")),
             "apple": load_png_rgba(str(PASTA_ASSETS / "apple.png")),
@@ -385,6 +387,7 @@ class SpriteBank:
         self.fruit_keys = list(self.fruits.keys())
         self._cache_fruit: dict[Tuple[str, int], np.ndarray] = {}
         self._cache_logo: dict[Tuple[int, int], np.ndarray] = {}
+        self._cache_menu_icon: dict[Tuple[str, int, int], np.ndarray] = {}
 
     def logo_scaled(self, size: Tuple[int, int]) -> Optional[np.ndarray]:
         if self.logo is None:
@@ -411,6 +414,33 @@ class SpriteBank:
             cv2.circle(frame, center, size_px // 2, (255, 255, 255), 2, cv2.LINE_AA)
             return
         overlay_bgra(frame, sprite, center, (size_px, size_px))
+
+    def _menu_icon_scaled(self, which: str, max_w: int, max_h: int) -> Optional[np.ndarray]:
+        src = self.menu_catcher if which == "catcher" else self.menu_gunslinger
+        if src is None:
+            return None
+        max_w = max(2, int(max_w))
+        max_h = max(2, int(max_h))
+        key = (which, max_w, max_h)
+        if key in self._cache_menu_icon:
+            return self._cache_menu_icon[key]
+
+        ih, iw = src.shape[:2]
+        if iw <= 0 or ih <= 0:
+            return None
+
+        scale = min(max_w / float(iw), max_h / float(ih))
+        nw = max(2, int(iw * scale))
+        nh = max(2, int(ih * scale))
+        self._cache_menu_icon[key] = cv2.resize(src, (nw, nh), interpolation=cv2.INTER_AREA)
+        return self._cache_menu_icon[key]
+
+    def draw_menu_icon(self, frame: np.ndarray, which: str, center: Tuple[int, int], box: Tuple[int, int], fallback_fruit: str) -> None:
+        icon = self._menu_icon_scaled(which, box[0], box[1])
+        if icon is None:
+            self.draw_fruit(frame, fallback_fruit, center, size_px=min(box[0], box[1]))
+            return
+        overlay_bgra(frame, icon, center, (icon.shape[1], icon.shape[0]))
 
 
 class Mode(Enum):
@@ -971,9 +1001,9 @@ def draw_menu(frame: np.ndarray, bank: SpriteBank, menu: MenuState, mao_menu: Op
     cv2.rectangle(frame, (xL1, tile_y), (xL2, tile_y + tile_h), (40, 160, 40), -1)
     cv2.rectangle(frame, (xR1, tile_y), (xR2, tile_y + tile_h), (40, 40, 160), -1)
 
-    icon_size = int(min(tile_w, tile_h) * 0.42)
-    bank.draw_fruit(frame, "banana", (xL1 + tile_w // 2, tile_y + int(tile_h * 0.42)), size_px=icon_size)
-    bank.draw_fruit(frame, "watermelon", (xR1 + tile_w // 2, tile_y + int(tile_h * 0.42)), size_px=icon_size)
+    icon_size = int(min(tile_w, tile_h) * 0.56)
+    bank.draw_menu_icon(frame, "catcher", (xL1 + tile_w // 2, tile_y + int(tile_h * 0.42)), (icon_size, icon_size), "banana")
+    bank.draw_menu_icon(frame, "gunslinger", (xR1 + tile_w // 2, tile_y + int(tile_h * 0.42)), (icon_size, icon_size), "watermelon")
 
     draw_text(frame, "Fruit Catcher", (xL1 + 18, tile_y + tile_h - 55), 0.85, 2)
     draw_text(frame, "Nariz move o cesto", (xL1 + 18, tile_y + tile_h - 25), 0.62, 2)
