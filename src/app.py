@@ -12,7 +12,7 @@ import numpy as np
 import mediapipe as mp
 
 # ----------------------------
-# Configuração
+# Configuraçãos
 # ----------------------------
 
 CAMERA_INDEX = 0
@@ -92,6 +92,32 @@ ANTI_PRESHOT_RESET_S = 0.20
 # Debug visuals
 SHOW_NOSE_CURSOR = False
 
+# ----------------------------
+# Power-ups Fruit Catcher
+# ----------------------------
+
+# Tipos base usados como fruta "normal" no Fruit Catcher
+NORMAL_FRUITS = ["orange", "apple", "watermelon", "banana"]
+
+# Power-ups do Fruit Catcher
+STRAWBERRY_BASKET_DURATION_S = 6.0      # morango -> cesto gigante durante N segundos
+CHERRY_DOUBLE_DURATION_S = 5.0          # 2 cerejas -> pontos a dobrar durante N segundos
+CHERRY_PAIR_WINDOW_S = 8.0              # tempo máximo entre a 1.ª e a 2.ª cereja
+
+STRAWBERRY_SPEED_MULT = 1.6             # morango cai mais rápido
+BOMB_SPEED_MULT = 1.2                   # bomba cai um pouco mais rápido
+
+# Probabilidades aproximadas de spawn por fruta especial (por spawn de fruta)
+# Tornadas ~2x mais raras do que antes
+STRAWBERRY_CHANCE = 0.09
+BOMB_CHANCE = 0.06
+CHERRY_PAIR_CHANCE = 0.07               # só usada se não houver cerejas no ecrã
+
+# Targets especiais para Gunslinger
+GUN_BAD_TARGETS = ["broccoli", "squash"]           # legumes que tiram pontos
+GUN_NORMAL_TARGETS = NORMAL_FRUITS                # frutas normais boas
+ALL_GUN_TARGETS = GUN_NORMAL_TARGETS + GUN_BAD_TARGETS
+GUN_VEG_PENALTY = 1.0                             # penalização por legume acertado
 
 # ----------------------------
 # Utilitários
@@ -141,7 +167,6 @@ def fmt_score(v: float) -> str:
     if abs(v - round(v)) < 1e-6:
         return str(int(round(v)))
     return f"{v:.1f}".rstrip("0").rstrip(".")
-
 
 # ----------------------------
 # PNG BGRA + overlay alpha
@@ -201,8 +226,11 @@ def overlay_bgra(dst_bgr: np.ndarray, src_bgra: np.ndarray, center_xy: Tuple[int
     out = src_rgb * alpha + roi_f * (1.0 - alpha)
     roi[:, :] = out.astype(np.uint8)
 
-
 EMA_ALPHA = 0.25
+
+# ----------------------------
+# Face tracking
+# ----------------------------
 
 @dataclass
 class FaceData:
@@ -293,6 +321,9 @@ class FaceTracker:
 
         return FaceData(self._nose_ema, float(self._mouth_ema), float(self._eyes_ema), True)
 
+# ----------------------------
+# Hand tracking
+# ----------------------------
 
 @dataclass
 class HandData:
@@ -372,19 +403,30 @@ class HandTracker:
         gesto = self._classify(lm)
         return HandData(tip=tip, label=label, gesture=gesto)
 
+# ----------------------------
+# Sprites
+# ----------------------------
 
 class SpriteBank:
     def __init__(self) -> None:
         self.logo = load_png_rgba(str(PASTA_ASSETS / "logo.png"))
         self.menu_catcher = load_png_rgba(str(PASTA_ASSETS / "menu_catcher.png"))
         self.menu_gunslinger = load_png_rgba(str(PASTA_ASSETS / "menu_gunslinger.png"))
-        self.fruits = {
-            "orange": load_png_rgba(str(PASTA_ASSETS / "orange.png")),
-            "apple": load_png_rgba(str(PASTA_ASSETS / "apple.png")),
-            "watermelon": load_png_rgba(str(PASTA_ASSETS / "watermelon.png")),
-            "banana": load_png_rgba(str(PASTA_ASSETS / "banana.png")),
-        }
-        self.fruit_keys = list(self.fruits.keys())
+
+        # Todos os objetos gráficos que o jogo reconhece
+        all_names = [
+            "orange", "apple", "watermelon", "banana",   # frutas base
+            "strawberry", "bomb", "cherry",              # power-ups Fruit Catcher
+            "broccoli", "squash",                        # "legumes" extra para o Gunslinger
+        ]
+
+        self.fruits: dict[str, Optional[np.ndarray]] = {}
+        for name in all_names:
+            self.fruits[name] = load_png_rgba(str(PASTA_ASSETS / f"{name}.png"))
+
+        # Lista geral
+        self.fruit_keys = [k for k, v in self.fruits.items() if v is not None]
+
         self._cache_fruit: dict[Tuple[str, int], np.ndarray] = {}
         self._cache_logo: dict[Tuple[int, int], np.ndarray] = {}
         self._cache_menu_icon: dict[Tuple[str, int, int], np.ndarray] = {}
@@ -442,12 +484,14 @@ class SpriteBank:
             return
         overlay_bgra(frame, icon, center, (icon.shape[1], icon.shape[0]))
 
+# ----------------------------
+# Estados & Menu
+# ----------------------------
 
 class Mode(Enum):
     MENU = auto()
     FRUIT = auto()
     GUN = auto()
-
 
 @dataclass
 class MenuState:
@@ -472,7 +516,6 @@ class MenuState:
     hard_flash_until: float = 0.0
     hard_flash_txt: str = ""
 
-
 def menu_reset(ms: MenuState) -> None:
     ms.baseline = None
     ms.calib_start = now_s()
@@ -485,7 +528,6 @@ def menu_reset(ms: MenuState) -> None:
     ms.t_mouth_confirm = None
     ms.t_hard_hold = None
     ms.t_hard_last_seen = 0.0
-
 
 def menu_update(ms: MenuState, face: FaceData, mao: Optional[HandData]) -> None:
     if not face.has_face:
@@ -555,16 +597,17 @@ def menu_update(ms: MenuState, face: FaceData, mao: Optional[HandData]) -> None:
         else:
             ms.t_hard_hold = None
 
-
 def menu_confirmed(ms: MenuState) -> bool:
     by_head = ms.t_hold_confirm is not None and (now_s() - ms.t_hold_confirm) >= HOLD_CONFIRM_S
     by_mouth = ms.t_mouth_confirm is not None and (now_s() - ms.t_mouth_confirm) >= MENU_MOUTH_HOLD_S
     return by_head or by_mouth
 
-
 def menu_exit(ms: MenuState) -> bool:
     return ms.t_hold_exit is not None and (now_s() - ms.t_hold_exit) >= HOLD_EXIT_S
 
+# ----------------------------
+# Fruit Catcher
+# ----------------------------
 
 @dataclass
 class Fruit:
@@ -573,7 +616,6 @@ class Fruit:
     r: int
     kind: str
     vy: float
-
 
 @dataclass
 class CatcherState:
@@ -585,16 +627,121 @@ class CatcherState:
     mouth_required: bool = ENABLE_MOUTH_TO_CATCH
     t_olhos_fechados: Optional[float] = None
 
+    # --- estado dos power-ups ---
+    basket_boost_until: float = 0.0      # morango: cesto maior até este instante
+    double_score_until: float = 0.0      # cerejas: pontos a dobrar até este instante
+    cherry_pending: bool = False         # já apanhou a 1.ª cereja, falta a 2.ª
+    cherry_deadline: float = 0.0         # limite temporal para completar o par
+
+    # Mensagem rápida (desativada agora, mas mantida caso queiras voltar)
+    ui_message: str = ""
+    ui_message_until: float = 0.0
+
+    # Ecrã de ajuda inicial
+    showing_help: bool = True
 
 def spawn_fruit(cs: CatcherState, w: int, bank: SpriteBank) -> None:
+    """Spawna fruta normal ou um power-up no Fruit Catcher."""
     r = random.randint(20, 32)
-    x = random.randint(r + 10, w - r - 10)
-    kind = random.choice(bank.fruit_keys) if bank.fruit_keys else "orange"
-    cs.fruits.append(Fruit(x=float(x), y=float(-r), r=r, kind=kind, vy=cs.speed))
+    x_min = r + 10
+    x_max = w - r - 10
+    if x_max <= x_min:
+        x_min, x_max = 10, max(20, w - 10)
+
+    # Não spawnar novo power-up se já houver algum power-up em queda
+    upgrade_on_screen = any(f.kind in ("strawberry", "bomb", "cherry") for f in cs.fruits)
+
+    # 1) Tentar spawnar um PAR de cerejas (no máximo 1 par ativo, e sem outros power-ups)
+    tem_cerejas_no_ecra = any(f.kind == "cherry" for f in cs.fruits)
+    pode_spawnar_cherry = (not tem_cerejas_no_ecra) and (not cs.cherry_pending) and (not upgrade_on_screen)
+
+    if pode_spawnar_cherry and random.random() < CHERRY_PAIR_CHANCE:
+        # escolhe um centro e coloca duas cerejas bem afastadas mas não coladas à borda
+        largura_util = x_max - x_min
+        if largura_util < 100:
+            mid = (x_min + x_max) // 2
+            offset = 50
+        else:
+            mid = random.randint(x_min + 50, x_max - 50)
+            offset = random.randint(45, 95)
+
+        x1 = int(clamp(mid - offset, x_min, x_max))
+        x2 = int(clamp(mid + offset, x_min, x_max))
+
+        cs.fruits.append(Fruit(x=float(x1), y=float(-r), r=r, kind="cherry", vy=cs.speed))
+        cs.fruits.append(Fruit(x=float(x2), y=float(-r), r=r, kind="cherry", vy=cs.speed))
+        cs.speed += 2 * FRUIT_FALL_SPEED_INC
+        return
+
+    # 2) Decidir entre morango / bomba / fruta normal
+    if not upgrade_on_screen:
+        roll = random.random()
+        if roll < STRAWBERRY_CHANCE:
+            kind = "strawberry"
+            vy = cs.speed * STRAWBERRY_SPEED_MULT
+            x = random.randint(x_min, x_max)
+        elif roll < STRAWBERRY_CHANCE + BOMB_CHANCE:
+            kind = "bomb"
+            vy = cs.speed * BOMB_SPEED_MULT
+            # bomba cai sempre perto de uma das margens
+            margem = min(80, max(40, (x_max - x_min) // 4))
+            if random.random() < 0.5:
+                x = random.randint(x_min, x_min + margem)
+            else:
+                x = random.randint(x_max - margem, x_max)
+        else:
+            kind = random.choice(NORMAL_FRUITS)
+            vy = cs.speed
+            x = random.randint(x_min, x_max)
+    else:
+        # já há um power-up em queda -> só fruta normal
+        kind = random.choice(NORMAL_FRUITS)
+        vy = cs.speed
+        x = random.randint(x_min, x_max)
+
+    cs.fruits.append(Fruit(x=float(x), y=float(-r), r=r, kind=kind, vy=vy))
     cs.speed += FRUIT_FALL_SPEED_INC
 
+def handle_catcher_hit(cs: CatcherState, f: Fruit, t: float) -> Tuple[int, bool]:
+    # multiplicador global de pontos (ativado pelas 2 cerejas)
+    mult = 2 if t < cs.double_score_until else 1
 
-def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank: SpriteBank, hard_mode: bool, eyes_base: float) -> Tuple[np.ndarray, bool]:
+    # --- MORANGO: cesto gigante por alguns segundos ---
+    if f.kind == "strawberry":
+        cs.basket_boost_until = max(cs.basket_boost_until, t + STRAWBERRY_BASKET_DURATION_S)
+        return 3 * mult, False  # morango dá mais pontos
+
+    # --- BOMBA: apanha tudo o que está no ecrã ---
+    if f.kind == "bomb":
+        total_outros = max(0, len(cs.fruits) - 1)
+        ganhos = (1 + total_outros) * mult
+        return ganhos, True
+
+    # --- CEREJAS: 2 cerejas => pontos a dobrar ---
+    if f.kind == "cherry":
+        if not cs.cherry_pending:
+            # primeira cereja do par
+            cs.cherry_pending = True
+            cs.cherry_deadline = t + CHERRY_PAIR_WINDOW_S
+        else:
+            # segunda cereja
+            if t <= cs.cherry_deadline:
+                cs.double_score_until = t + CHERRY_DOUBLE_DURATION_S
+            cs.cherry_pending = False
+            cs.cherry_deadline = 0.0
+        return 1 * mult, False  # cada cereja também vale 1 ponto
+
+    # fruta normal
+    return 1 * mult, False
+
+def run_fruit_catcher(
+    frame: np.ndarray,
+    face: FaceData,
+    cs: CatcherState,
+    bank: SpriteBank,
+    hard_mode: bool,
+    eyes_base: float
+) -> Tuple[np.ndarray, bool]:
     h, w = frame.shape[:2]
     t = now_s()
     remaining = max(0.0, CATCHER_ROUND_S - (t - cs.start_t))
@@ -604,10 +751,16 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
         frame = draw_end_screen(frame, "FIM!", f"Pontuacao: {cs.score}")
         return frame, True
 
+    # largura efetiva do cesto (normal ou "gigante" por efeito do morango)
+    if t < cs.basket_boost_until:
+        basket_w = int(BASKET_W * 1.6)
+    else:
+        basket_w = BASKET_W
+
     bx = int(clamp(face.nose[0], 0.0, 1.0) * w) if face.has_face else w // 2
-    basket_x1 = int(clamp(bx - BASKET_W // 2, 0, w - BASKET_W))
+    basket_x1 = int(clamp(bx - basket_w // 2, 0, w - basket_w))
     basket_y1 = h - 70
-    basket_x2 = basket_x1 + BASKET_W
+    basket_x2 = basket_x1 + basket_w
     basket_y2 = basket_y1 + BASKET_H
 
     basket_active = (not cs.mouth_required) or (face.mouth_open >= MOUTH_OPEN_THRESHOLD)
@@ -624,11 +777,14 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
         olhos_fechados_ok = cs.t_olhos_fechados is not None and (t - cs.t_olhos_fechados) >= EYES_CLOSED_HOLD_S
         basket_active = basket_active and olhos_fechados_ok
 
+    # spawn normal/power-up
     if t >= cs.next_spawn_t:
         spawn_fruit(cs, w, bank)
         cs.next_spawn_t = t + random.uniform(*FRUIT_SPAWN_EVERY_S)
 
     new_fruits: List[Fruit] = []
+    clear_all = False
+
     for f in cs.fruits:
         f.y += f.vy
 
@@ -636,18 +792,28 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
             cx = clamp(f.x, basket_x1, basket_x2)
             cy = clamp(f.y, basket_y1, basket_y2)
             if (f.x - cx) ** 2 + (f.y - cy) ** 2 <= f.r ** 2:
-                cs.score += 1
-                continue
+                delta, do_clear = handle_catcher_hit(cs, f, t)
+                cs.score += delta
+                if do_clear:
+                    clear_all = True
+                continue  # este fruto foi apanhado
+
+        if clear_all:
+            # uma bomba já limpou o ecrã neste frame
+            continue
 
         if f.y - f.r > h + 10:
             continue
 
         new_fruits.append(f)
-    cs.fruits = new_fruits
 
+    cs.fruits = [] if clear_all else new_fruits
+
+    # desenhar frutas
     for f in cs.fruits:
         bank.draw_fruit(frame, f.kind, (int(f.x), int(f.y)), size_px=f.r * 2)
 
+    # desenhar cesto
     basket_col = (80, 255, 80) if basket_active else (80, 80, 255)
     cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), basket_col, -1)
     cv2.rectangle(frame, (basket_x1, basket_y1), (basket_x2, basket_y2), (255, 255, 255), 2)
@@ -656,18 +822,69 @@ def run_fruit_catcher(frame: np.ndarray, face: FaceData, cs: CatcherState, bank:
     draw_text(frame, f"{titulo}  |  Score: {cs.score}", (20, 140), 0.9, 2)
     draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 175), 0.8, 2)
 
+    # HUD dos power-ups (estado, não explicação chata)
+    hud_y = 210
+    if t < cs.basket_boost_until:
+        draw_text(frame, "Morango ativo: cesto gigante", (20, hud_y), 0.70, 2)
+        hud_y += 28
+    if t < cs.double_score_until:
+        draw_text(frame, "Cerejas ativas: pontos x2", (20, hud_y), 0.70, 2)
+        hud_y += 28
+
     if hard_mode:
         estado_olhos = "FECHADOS" if olhos_fechados_raw else "ABERTOS"
         estado_cesto = "ATIVO" if basket_active else "BLOQUEADO"
-        draw_text(frame, f"Olhos: {estado_olhos}", (20, 210), 0.70, 2)
-        draw_text(frame, f"Cesto: {estado_cesto} (fecha {EYES_CLOSED_HOLD_S:0.2f}s)", (20, 242), 0.70, 2)
+        draw_text(frame, f"Olhos: {estado_olhos}", (20, hud_y), 0.70, 2)
+        hud_y += 28
+        draw_text(frame, f"Cesto: {estado_cesto} (fecha {EYES_CLOSED_HOLD_S:0.2f}s)", (20, hud_y), 0.70, 2)
+        hud_y += 28
 
     draw_text(frame, "Q: menu | ESC: sair", (20, h - 45), 0.6, 2)
     return frame, False
 
+def draw_catcher_help_screen(frame: np.ndarray, bank: SpriteBank, hard_mode: bool) -> None:
+    """Ecrã inicial de ajuda para o Fruit Catcher (power-ups)."""
+    h, w = frame.shape[:2]
+    tinted = overlay_tint(frame, (0, 0, 0), 0.65)
+    frame[:] = tinted
+
+    cx = w // 2
+    draw_text(frame, "FRUIT CATCHER", (cx - 160, 70), 1.1, 3)
+    draw_text(frame, "Power-ups e regras básicas", (cx - 200, 110), 0.8, 2)
+
+    base_y = 160
+    linha_gap = 90
+    icon_size = 60
+    icon_cx = int(w * 0.14)
+    text_x = icon_cx + icon_size
+
+    # Morango
+    y = base_y
+    bank.draw_fruit(frame, "strawberry", (icon_cx, y), icon_size)
+    draw_text(frame, "Morango: cesto gigante", (text_x, y - 10), 0.7, 2)
+    draw_text(frame, f"Durante ~{int(STRAWBERRY_BASKET_DURATION_S)}s o cesto fica maior.", (text_x, y + 18), 0.6, 2)
+
+    # Cerejas
+    y += linha_gap
+    # desenhar 2 cerejas lado a lado
+    bank.draw_fruit(frame, "cherry", (icon_cx - 18, y), icon_size)
+    bank.draw_fruit(frame, "cherry", (icon_cx + 18, y), icon_size)
+    draw_text(frame, "Cerejas: 2 seguidas ativam pontos x2", (text_x, y - 10), 0.7, 2)
+    draw_text(frame, "Apanha 2 cerejas em pouco tempo", (text_x, y + 18), 0.6, 2)
+    draw_text(frame, f"para ativar pontos a dobrar ~{int(CHERRY_DOUBLE_DURATION_S)}s.", (text_x, y + 38), 0.6, 2)
+
+    # Bomba
+    y += linha_gap
+    bank.draw_fruit(frame, "bomb", (icon_cx, y), icon_size)
+    draw_text(frame, "Bomba: limpa o ecrã", (text_x, y - 10), 0.7, 2)
+    draw_text(frame, "Se apanhares a bomba, todas as frutas", (text_x, y + 18), 0.6, 2)
+    draw_text(frame, "no ecrã contam como apanhadas.", (text_x, y + 38), 0.6, 2)
+
+    footer_y = h - 60
+    draw_text(frame, "Espaço: começar  |  Q: voltar ao menu", (cx - 230, footer_y), 0.75, 2)
 
 # ----------------------------
-# Gunslinger (Hard: 2 alvos + teleporte)
+# Gunslinger
 # ----------------------------
 
 @dataclass
@@ -678,7 +895,6 @@ class Target:
     hit: bool = False
     is_teleport: bool = False
     next_move_t: float = 0.0
-
 
 @dataclass
 class GunslingerState:
@@ -698,6 +914,9 @@ class GunslingerState:
     bloqueado_mao: bool = False
     t_mao_sumiu: Optional[float] = None
 
+    # info extra para legumes + ajuda
+    last_bad_hits: int = 0
+    showing_help: bool = True
 
 def border_pos(w: int, h: int) -> Tuple[int, int]:
     m = HARD_BORDER_MARGIN_PX
@@ -710,10 +929,14 @@ def border_pos(w: int, h: int) -> Tuple[int, int]:
         return (m, random.randint(m, h - m))
     return (w - m, random.randint(m, h - m))
 
-
 def gunslinger_new_targets(w: int, h: int, bank: SpriteBank, hard_mode: bool) -> Tuple[List[Target], float]:
-    kind1 = random.choice(bank.fruit_keys) if bank.fruit_keys else "orange"
-    kind2 = random.choice(bank.fruit_keys) if bank.fruit_keys else "apple"
+    # Pool apenas de frutas normais + legumes (sem power-ups visuais)
+    gun_pool = [k for k in bank.fruit_keys if k in ALL_GUN_TARGETS]
+    if not gun_pool:
+        gun_pool = ["orange"]
+
+    kind1 = random.choice(gun_pool)
+    kind2 = random.choice(gun_pool)
 
     def center_pos() -> Tuple[int, int]:
         tx = random.randint(w // 3, int(w * 0.66))
@@ -739,19 +962,27 @@ def gunslinger_new_targets(w: int, h: int, bank: SpriteBank, hard_mode: bool) ->
             targets = [Target(x=x, y=y, kind=kind1)]
     else:
         x, y = center_pos()
+        # Em modo normal, privilegiar frutas boas
+        good_pool = [k for k in gun_pool if k in GUN_NORMAL_TARGETS] or gun_pool
+        kind1 = random.choice(good_pool)
         targets = [Target(x=x, y=y, kind=kind1)]
 
     next_signal = now_s() + random.uniform(*SIGNAL_DELAY_S)
     return targets, next_signal
 
-
-def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerState, bank: SpriteBank, hard_mode: bool) -> Tuple[np.ndarray, bool]:
+def run_gunslinger(
+    frame: np.ndarray,
+    mao: Optional[HandData],
+    gs: GunslingerState,
+    bank: SpriteBank,
+    hard_mode: bool
+) -> Tuple[np.ndarray, bool]:
     h, w = frame.shape[:2]
     t = now_s()
 
     remaining = max(0.0, GUN_TOTAL_ROUND_S - (t - gs.start_t))
     if remaining <= 0.0:
-        frame = draw_end_screen(frame, "FIM!", f"Pontuação: {fmt_score(gs.score)}")
+        frame = draw_end_screen(frame, "FIM!", f"Pontuaçao: {fmt_score(gs.score)}")
         return frame, True
 
     raio = TARGET_RADIUS_HARD if hard_mode else TARGET_RADIUS
@@ -769,7 +1000,8 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         gs.signal_t = t
         gs.last_reaction = None
         gs.last_hits = 0
-        gs.last_total = len(gs.targets)
+        gs.last_total = 0
+        gs.last_bad_hits = 0
         gs.last_award = 0.0
         for tgt in gs.targets:
             tgt.hit = False
@@ -782,6 +1014,34 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         if not hard_mode:
             return mao.gesture in ("POINT", "PEACE", "OPEN")
         return mao.gesture == GUN_GESTO_HARD
+
+    def counts_good_bad() -> Tuple[int, int, int]:
+        good_hits = 0
+        good_total = 0
+        bad_hits = 0
+        for tgt in gs.targets:
+            if tgt.kind in GUN_BAD_TARGETS:
+                if tgt.hit:
+                    bad_hits += 1
+            else:
+                good_total += 1
+                if tgt.hit:
+                    good_hits += 1
+        return good_hits, good_total, bad_hits
+
+    def compute_award() -> Tuple[float, int, int, int]:
+        good_hits, good_total, bad_hits = counts_good_bad()
+        if hard_mode and good_total == 2:
+            if good_hits == 2:
+                base = 1.0
+            elif good_hits == 1:
+                base = HARD_DOUBLE_PARTIAL_SCORE
+            else:
+                base = 0.0
+        else:
+            base = 1.0 if good_hits >= 1 else 0.0
+        award = base - bad_hits * GUN_VEG_PENALTY
+        return award, good_hits, bad_hits, good_total
 
     def try_hit(hx: int, hy: int) -> bool:
         for tgt in gs.targets:
@@ -808,44 +1068,35 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
             hy = int(clamp(mao.tip[1], 0.0, 1.0) * h)
 
             if try_hit(hx, hy):
-                if gs.last_reaction is None:
+                award, good_hits, bad_hits, good_total = compute_award()
+                # primeira reação só conta se houver pelo menos um bom acerto
+                if gs.last_reaction is None and good_hits > 0:
                     gs.last_reaction = t - gs.signal_t
                     gs.best_time = gs.last_reaction if gs.best_time is None else min(gs.best_time, gs.last_reaction)
 
-                hits = sum(1 for x in gs.targets if x.hit)
-                total = len(gs.targets)
-                gs.last_hits = hits
-                gs.last_total = total
+                gs.last_hits = good_hits
+                gs.last_total = good_total
+                gs.last_bad_hits = bad_hits
 
-                if hits == total:
-                    # completou antes do timeout: pontuação total
-                    gs.last_award = 1.0
-                    gs.score += 1.0
+                # termina a ronda quando todos os alvos tiverem sido atingidos (bons e maus)
+                if all(tgt.hit for tgt in gs.targets):
+                    gs.last_award = award
+                    gs.score = max(0.0, gs.score + award)
                     gs.phase = "RESULT"
                     gs.last_shot_t = t
 
-        # timeoue
+        # timeout
         if gs.phase == "SIGNAL" and (t - gs.signal_t) >= timeout:
-            hits = sum(1 for x in gs.targets if x.hit)
-            total = len(gs.targets)
-
-            award = 0.0
-            if hard_mode and total == 2:
-                if hits == 2:
-                    award = 1.0
-                elif hits == 1:
-                    award = HARD_DOUBLE_PARTIAL_SCORE
-            else:
-                award = 1.0 if hits >= 1 else 0.0
-
+            award, good_hits, bad_hits, good_total = compute_award()
             gs.last_award = award
-            gs.last_hits = hits
-            gs.last_total = total
-            gs.score += award
+            gs.last_hits = good_hits
+            gs.last_total = good_total
+            gs.last_bad_hits = bad_hits
+            gs.score = max(0.0, gs.score + award)
             gs.phase = "RESULT"
             gs.last_shot_t = t
-            if hits == 0:
-                gs.last_reaction = None  # timeout sem hit
+            if good_hits == 0:
+                gs.last_reaction = None  # timeout sem bom hit
 
     if gs.phase == "RESULT" and (t - gs.last_shot_t) >= 1.2:
         gs.targets, gs.next_signal_t = gunslinger_new_targets(w, h, bank, hard_mode)
@@ -853,6 +1104,10 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
         gs.bloqueado_mao = False
         gs.t_mao_sumiu = None
         gs.last_reaction = None
+        gs.last_hits = 0
+        gs.last_total = 0
+        gs.last_bad_hits = 0
+        gs.last_award = 0.0
 
     titulo = "GUNSLINGER" if not hard_mode else "GUNSLINGER (HARD MODE)"
 
@@ -878,12 +1133,12 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
 
         if gs.bloqueado_mao:
             blend_rect(frame, 0, 0, w, h, 0.22, (0, 0, 255))
-            draw_text(frame, "RETIRA A MÃO DO ECRÃ!", (w // 2 - 235, h // 2 - 10), 1.0, 3)
+            draw_text(frame, "RETIRA A MAO DO ECRA!", (w // 2 - 235, h // 2 - 10), 1.0, 3)
             draw_text(frame, "Só depois podes disparar", (w // 2 - 225, h // 2 + 28), 0.8, 2)
         else:
             if hard_mode:
-                if len(gs.targets) == 2:
-                    msg = "AGORA! (POINT) acerta nos 2 alvos"
+                if len(gs.targets) >= 2:
+                    msg = "AGORA! (POINT) acerta nos alvos"
                 elif gs.targets and gs.targets[0].is_teleport:
                     msg = "AGORA! (POINT) alvo teleporta na borda"
                 else:
@@ -892,32 +1147,33 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
                 msg = "AGORA! toca no alvo"
             draw_text(frame, msg, (20, 175), 0.8, 2)
 
-        if hard_mode and len(gs.targets) == 2:
-            hits = sum(1 for x in gs.targets if x.hit)
-            draw_text(frame, f"Acertos: {hits}/2  (1/2 = +{HARD_DOUBLE_PARTIAL_SCORE})", (20, 210), 0.70, 2)
-
         draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 242), 0.75, 2)
 
-    else:
+    else:  # RESULT
         for tgt in gs.targets:
-            base_col = (60, 200, 60) if tgt.hit else (0, 200, 255)
+            base_col = (60, 200, 60) if tgt.hit and tgt.kind not in GUN_BAD_TARGETS else (0, 200, 255)
             cv2.circle(frame, (tgt.x, tgt.y), raio, base_col, -1, cv2.LINE_AA)
             cv2.circle(frame, (tgt.x, tgt.y), raio, (255, 255, 255), 2, cv2.LINE_AA)
             bank.draw_fruit(frame, tgt.kind, (tgt.x, tgt.y), size_px=raio * 2 - 6)
 
-        if gs.last_total == 2:
-            if gs.last_hits == 2:
-                draw_text(frame, f"OK! {gs.last_hits}/2 (+{fmt_score(gs.last_award)})", (20, 175), 0.85, 2)
-            elif gs.last_hits == 1:
-                draw_text(frame, f"Meio! 1/2 (+{fmt_score(gs.last_award)})", (20, 175), 0.85, 2)
-            else:
-                draw_text(frame, "Falhou 0/2", (20, 175), 0.85, 2)
-        else:
-            if gs.last_award > 0:
-                draw_text(frame, f"OK! (+{fmt_score(gs.last_award)})", (20, 175), 0.85, 2)
-            else:
-                draw_text(frame, "Falhou", (20, 175), 0.85, 2)
+        good_info = ""
+        if gs.last_total > 0:
+            good_info = f"{gs.last_hits}/{gs.last_total} frutas boas"
+        veg_info = ""
+        if gs.last_bad_hits > 0:
+            veg_info = f"  |  Legumes acertados: {gs.last_bad_hits}"
 
+        if gs.last_award > 0:
+            msg = f"OK! (+{fmt_score(gs.last_award)}) {good_info}{veg_info}"
+        elif gs.last_award < 0:
+            msg = f"Ai! (-{fmt_score(-gs.last_award)}) {good_info}{veg_info}"
+        else:
+            if gs.last_hits == 0 and gs.last_bad_hits == 0:
+                msg = "Sem acertos."
+            else:
+                msg = f"Equilíbrio 0. {good_info}{veg_info}"
+
+        draw_text(frame, msg, (20, 175), 0.80, 2)
         draw_text(frame, f"Tempo: {remaining:0.1f}s", (20, 210), 0.75, 2)
 
     if mao is not None:
@@ -934,6 +1190,44 @@ def run_gunslinger(frame: np.ndarray, mao: Optional[HandData], gs: GunslingerSta
     draw_text(frame, "Q: menu | ESC: sair", (20, h - 45), 0.6, 2)
     return frame, False
 
+def draw_gunslinger_help_screen(frame: np.ndarray, bank: SpriteBank, hard_mode: bool) -> None:
+    """Ecrã inicial de ajuda para o Gunslinger (frutas vs legumes)."""
+    h, w = frame.shape[:2]
+    tinted = overlay_tint(frame, (0, 0, 0), 0.65)
+    frame[:] = tinted
+
+    cx = w // 2
+    draw_text(frame, "GUNSLINGER", (cx - 140, 70), 1.1, 3)
+    draw_text(frame, "Dispara com o gesto POINT / mão aberta", (cx - 260, 110), 0.8, 2)
+
+    base_y = 160
+    icon_size = 50
+
+    # Frutas boas
+    draw_text(frame, "Frutas boas (acerta nestas):", (40, base_y), 0.7, 2)
+    y_icons = base_y + 35
+    x_icons = 80
+    for kind in ("orange", "apple", "watermelon", "banana"):
+        bank.draw_fruit(frame, kind, (x_icons, y_icons), icon_size)
+        x_icons += icon_size + 24
+
+    # Legumes maus
+    y_veg_label = y_icons + 70
+    draw_text(frame, "Legumes (evita disparar, tiram pontos):", (40, y_veg_label), 0.7, 2)
+    y_veg = y_veg_label + 35
+    x_veg = 110
+    for kind in ("broccoli", "squash"):
+        bank.draw_fruit(frame, kind, (x_veg, y_veg), icon_size)
+        x_veg += icon_size + 60
+
+    if hard_mode:
+        extra_y = y_veg + 65
+        draw_text(frame, "HARD MODE:", (40, extra_y), 0.7, 2)
+        draw_text(frame, "- Pode haver 2 alvos ao mesmo tempo", (40, extra_y + 26), 0.6, 2)
+        draw_text(frame, "- Pode haver um alvo que teleporta na borda", (40, extra_y + 48), 0.6, 2)
+
+    footer_y = h - 60
+    draw_text(frame, "Espaço: começar  |  Q: voltar ao menu", (cx - 230, footer_y), 0.75, 2)
 
 # ----------------------------
 # Menu render
@@ -1017,7 +1311,7 @@ def draw_menu(frame: np.ndarray, bank: SpriteBank, menu: MenuState, mao_menu: Op
         cv2.rectangle(frame, (xR1 - 4, tile_y - 4), (xR2 + 4, tile_y + tile_h + 4), (255, 255, 255), 4)
         cv2.rectangle(frame, (xL1 - 2, tile_y - 2), (xL2 + 2, tile_y + tile_h + 2), (255, 255, 255), 2)
 
-    # calibracao whatever
+    # calibracao
     if menu.is_calibrating:
         draw_text(frame, "A calibrar... olha em frente", (m, header_h - 12), 0.55, 2)
 
@@ -1026,12 +1320,11 @@ def draw_menu(frame: np.ndarray, bank: SpriteBank, menu: MenuState, mao_menu: Op
         blend_rect(frame, 0, 0, w, header_h, 0.18, (0, 0, 0))
         draw_text(frame, menu.hard_flash_txt, (w // 2 - 180, 32), 0.9, 3)
 
-    # footer controls (compacto)
+    # footer controls 
     y = h - footer_h + 34
     draw_text(frame, "Nariz Esq/Dir: escolher | Nariz Cima: confirmar | Nariz Baixo: sair", (m, y), 0.58, 2)
     y += 26
     draw_text(frame, "Boca aberta: confirmar | R: recalibrar | ESC: sair", (m, y), 0.58, 2)
-
 
 # ----------------------------
 # Main
@@ -1124,14 +1417,14 @@ def main() -> None:
             if do_confirm:
                 if menu.selected == 0:
                     mode = Mode.FRUIT
-                    catcher = CatcherState(start_t=now_s())
+                    catcher = CatcherState(start_t=0.0)  # será definido quando sair do ecrã de ajuda
                 else:
                     mode = Mode.GUN
                     contador_frames_mao = 0
                     ultima_mao = None
                     targets, proximo = gunslinger_new_targets(w, h, bank, hard_mode=menu.hard_mode)
                     guns = GunslingerState(
-                        start_t=now_s(),
+                        start_t=0.0,  # será definido quando sair do ecrã de ajuda
                         phase="WAIT",
                         score=0.0,
                         best_time=None,
@@ -1144,36 +1437,67 @@ def main() -> None:
         # ---------------- FRUIT ----------------
         elif mode == Mode.FRUIT:
             assert catcher is not None
-            frame, done = run_fruit_catcher(frame, face, catcher, bank, hard_mode=menu.hard_mode, eyes_base=menu.baseline_eyes_open)
-
-            if done:
-                if key in (13, 10, ord("q"), ord("Q")):
+            if catcher.showing_help:
+                draw_catcher_help_screen(frame, bank, menu.hard_mode)
+                if key == 32:  # espaço
+                    catcher.showing_help = False
+                    catcher.start_t = now_s()
+                    catcher.next_spawn_t = catcher.start_t  # spawn imediato da primeira fruta
+                elif key in (ord("q"), ord("Q")):
                     mode = Mode.MENU
                     menu_reset(menu)
                     catcher = None
             else:
-                if key in (ord("q"), ord("Q")):
-                    mode = Mode.MENU
-                    menu_reset(menu)
-                    catcher = None
+                frame, done = run_fruit_catcher(frame, face, catcher, bank, hard_mode=menu.hard_mode, eyes_base=menu.baseline_eyes_open)
+
+                if done:
+                    if key in (13, 10, ord("q"), ord("Q")):
+                        mode = Mode.MENU
+                        menu_reset(menu)
+                        catcher = None
+                else:
+                    if key in (ord("q"), ord("Q")):
+                        mode = Mode.MENU
+                        menu_reset(menu)
+                        catcher = None
 
         # ---------------- GUN ----------------
         elif mode == Mode.GUN:
             assert guns is not None
-            frame, done = run_gunslinger(frame, ultima_mao, guns, bank, hard_mode=menu.hard_mode)
-
-            if done:
-                if key in (13, 10, ord("q"), ord("Q")):
+            if guns.showing_help:
+                draw_gunslinger_help_screen(frame, bank, menu.hard_mode)
+                if key == 32:  # espaço
+                    guns.showing_help = False
+                    guns.start_t = now_s()
+                    guns.targets, guns.next_signal_t = gunslinger_new_targets(w, h, bank, hard_mode=menu.hard_mode)
+                    guns.phase = "WAIT"
+                    guns.last_reaction = None
+                    guns.last_hits = 0
+                    guns.last_total = 0
+                    guns.last_bad_hits = 0
+                    guns.last_award = 0.0
+                    guns.bloqueado_mao = False
+                    guns.t_mao_sumiu = None
+                elif key in (ord("q"), ord("Q")):
                     mode = Mode.MENU
                     menu_reset(menu)
                     guns = None
                     ultima_mao = None
             else:
-                if key in (ord("q"), ord("Q")):
-                    mode = Mode.MENU
-                    menu_reset(menu)
-                    guns = None
-                    ultima_mao = None
+                frame, done = run_gunslinger(frame, ultima_mao, guns, bank, hard_mode=menu.hard_mode)
+
+                if done:
+                    if key in (13, 10, ord("q"), ord("Q")):
+                        mode = Mode.MENU
+                        menu_reset(menu)
+                        guns = None
+                        ultima_mao = None
+                else:
+                    if key in (ord("q"), ord("Q")):
+                        mode = Mode.MENU
+                        menu_reset(menu)
+                        guns = None
+                        ultima_mao = None
 
         # debug do nariz
         if SHOW_NOSE_CURSOR and face.has_face and mode != Mode.GUN:
